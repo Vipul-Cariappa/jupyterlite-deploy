@@ -31,9 +31,6 @@ jobs:
         shell: bash -l {0}
         run: |
           cp README.md content
-          cd content
-          git clone https://github.com/Vipul-Cariappa/logic.git
-          cd ..
           jupyter lite build --contents content --output-dir dist
 
       - name: Upload artifact

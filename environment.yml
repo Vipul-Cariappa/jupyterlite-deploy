@@ -7,3 +7,6 @@ dependencies:
   - matplotlib
   - sympy
   - numpy
+  - pip
+  - pip:
+    - py-logic
