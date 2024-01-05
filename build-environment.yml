@@ -4,6 +4,14 @@ channels:
 dependencies:
   - python
   - pip
+  - pip:
+    - jupyterlite-javascript-kernel==0.2.2
+    # SQLite kernel (optional)
+    - jupyterlite-xeus-sqlite==0.2.1
+    # P5 kernel (optional)
+    - jupyterlite-p5-kernel==0.1.0
+    # Lua kernel (optional)
+    - jupyterlite-xeus-lua==0.3.1
   - jupyter_server
   - jupyterlite-core >=0.2.0,<0.3.0
   - jupyterlite-xeus-python >=1.0.0,<2.0.0
