@@ -5,6 +5,7 @@ dependencies:
   - python
   - pip
   - pip:
+    - jupyterlite_xeus
     - jupyterlite-javascript-kernel==0.2.2
     # SQLite kernel (optional)
     - jupyterlite-xeus-sqlite==0.2.1

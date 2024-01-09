@@ -27,11 +27,50 @@ jobs:
           environment-file: build-environment.yml
           cache-environment: true
 
+      - name: Build KariLang-Kernel
+        run: |
+          # get source code
+          git clone https://github.com/Vipul-Cariappa/KariLang-Kernel.git
+          cd KariLang-Kernel/
+          git submodule update --init --checkout --recursive
+
+          # compileing
+          # creating environment
+          micromamba create -n xeus-python-dev \
+            --platform=emscripten-wasm32 \
+            -c https://repo.mamba.pm/emscripten-forge \
+            -c https://repo.mamba.pm/conda-forge \
+            --yes \
+            "python>=3.11" pybind11 nlohmann_json pybind11_json numpy pytest \
+            bzip2 sqlite zlib libffi xtl pyjs \
+            xeus xeus-sqlite xeus-lite
+          
+          # setting environment variables
+          WASM_ENV_NAME=xeus-python-dev
+          WASM_ENV_PREFIX=$MAMBA_ROOT_PREFIX/envs/$WASM_ENV_NAME
+          export PREFIX=$WASM_ENV_PREFIX
+          export CMAKE_PREFIX_PATH=$PREFIX
+          export CMAKE_SYSTEM_PREFIX_PATH=$PREFIX
+
+          # running cmake
+          emcmake cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ON \
+            -DCMAKE_INSTALL_PREFIX=$PREFIX \
+            .
+          
+          # building and installing
+          emmake make -j2 install
+
+
       - name: Build the JupyterLite site
         shell: bash -l {0}
         run: |
+          WASM_ENV_NAME=xeus-python-dev
+          WASM_ENV_PREFIX=$MAMBA_ROOT_PREFIX/envs/$WASM_ENV_NAME
+
           cp README.md content
-          jupyter lite build --contents content --output-dir dist
+          jupyter lite build --contents content --output-dir dist --XeusAddon.prefix=$WASM_ENV_PREFIX
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v1
