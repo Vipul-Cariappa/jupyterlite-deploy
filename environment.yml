@@ -8,5 +8,8 @@ dependencies:
   - sympy
   - numpy
   - pip
+  - pandas
+  - scikit-learn
+  - python-language-server[all]
   - pip:
     - py-logic
