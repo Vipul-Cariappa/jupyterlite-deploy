@@ -48,7 +48,7 @@ jobs:
             --yes \
             "python>=3.11" pybind11 nlohmann_json pybind11_json numpy pytest \
             bzip2 sqlite zlib libffi xtl pyjs \
-            "xeus=3" xeus-sqlite xeus-lite
+            "xeus=3" xeus-sqlite "xeus-lite=1"
           
           # setting environment variables
           export WASM_ENV_NAME=xeus-python-dev
