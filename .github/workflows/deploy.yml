@@ -35,16 +35,107 @@ jobs:
       - name: Create the wasm kernel environment
         shell: bash -l {0}
         run: |
-          micromamba create -y -f environment.yml --platform=emscripten-wasm32
+          # The channels are passed on the command line as well as being read
+          # from the file. jupyterlite-xeus recovers them when it packs the
+          # prefix by parsing the -c arguments back out of the environment's
+          # creation command, and refuses to pack an environment whose channels
+          # it cannot see there ("Cannot detect channels from prefix").
+          channels=$(python -c "import yaml; print(' '.join('-c ' + c for c in yaml.safe_load(open('environment.yml'))['channels']))")
+          micromamba create -y -f environment.yml --platform=emscripten-wasm32 $channels
 
           # Pure-python wheels the python kernel needs
           python -m pip install --no-deps --target \
             "$MAMBA_ROOT_PREFIX/envs/xeus-kernels/lib/python3.13/site-packages" \
             py-logic
 
+      - name: Build the CppJIT C++ kernel
+        shell: bash -l {0}
+        env:
+          # Upstream repositories, pinned. patches/README.md explains the pins
+          # and how to move them.
+          CPPINTEROP_COMMIT: 070b0a492feb8f87a56267585f31e1f1bf9aa068
+          CPPJIT_COMMIT: 5a33027d38c0d8db39fa903c849514e324df4320
+          XEUS_CPP_COMMIT: 82f9064929138f60995bfa12d0b82a382ff6a1b0
+        run: |
+          PREFIX=$MAMBA_ROOT_PREFIX/envs/xeus-kernels
+          BUILD_ENV=$MAMBA_ROOT_PREFIX/envs/build-env
+          SYSROOT_PATH=$EMSDK/upstream/emscripten/cache/sysroot
+          PATCHES=$PWD/patches
+          mkdir -p work && cd work
+
+          clone_and_patch() {
+            git clone -q "$2" "$1"
+            git -C "$1" checkout -q "$3"
+            git -C "$1" -c user.email=ci@localhost -c user.name=ci \
+              am --keep-non-patch $PATCHES/$1-*.patch
+          }
+          clone_and_patch CppInterOp https://github.com/compiler-research/CppInterOp.git "$CPPINTEROP_COMMIT"
+          clone_and_patch cppjit     https://github.com/compiler-research/cppjit.git     "$CPPJIT_COMMIT"
+          clone_and_patch xeus-cpp   https://github.com/compiler-research/xeus-cpp.git   "$XEUS_CPP_COMMIT"
+
+          # cppinterop-tblgen generates CppInterOp's .inc files from .td and
+          # cannot run under emscripten, so it is built natively first, against
+          # the llvmdev of the build environment. CMAKE_PREFIX_PATH is
+          # deliberately absent: pointed at the wasm prefix, this build picks up
+          # the wasm libz and fails to link.
+          cmake -S CppInterOp -B tblgen \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=$BUILD_ENV/lib/cmake/llvm \
+            -DCPPINTEROP_ENABLE_TESTING=OFF \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCPPINTEROP_BUILD_TABLEGEN_ONLY=ON
+          cmake --build tblgen --target cppinterop-tblgen -j $(nproc)
+
+          # No LLVM is built here: the emscripten-forge llvm package is a full
+          # install tree -- cmake configs and clang resource directory included
+          # -- so the wasm prefix doubles as the LLVM the kernel links against.
+          export CMAKE_SYSTEM_PREFIX_PATH=$PREFIX
+
+          emcmake cmake -S CppInterOp -B build-cppinterop \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=$PREFIX \
+            -DLLVM_DIR=$PREFIX/lib/cmake/llvm \
+            -DLLD_DIR=$PREFIX/lib/cmake/lld \
+            -DClang_DIR=$PREFIX/lib/cmake/clang \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_INSTALL_PREFIX=$PREFIX \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ON \
+            -DSYSROOT_PATH=$SYSROOT_PATH \
+            -DCPPINTEROP_TABLEGEN_EXE=$PWD/tblgen/utils/TableGen/cppinterop-tblgen
+          emmake make -C build-cppinterop -j $(nproc) clangCppInterOp
+          emmake make -C build-cppinterop install
+
+          # libcppjit.so is a side module the kernel's own CPython dlopens, so it
+          # builds against the CppInterOp just installed rather than fetching its
+          # own.
+          emcmake cmake -S cppjit -B build-cppjit \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=$PREFIX \
+            -DCPPJIT_USE_PREBUILT_CPPINTEROP=ON \
+            -DCPPINTEROP_INSTALL_DIR=$PREFIX \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ON
+          emmake make -C build-cppjit -j $(nproc) cppjit
+
+          # The kernel bakes cppjit and the headers the interpreter needs into
+          # xcpp.data; nothing is read from this machine at run time.
+          emcmake cmake -S xeus-cpp -B build-xeus-cpp \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=$PREFIX \
+            -DCMAKE_INSTALL_PREFIX=$PREFIX \
+            -DXEUS_CPP_EMSCRIPTEN_WASM_BUILD=ON \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ON \
+            -DXEUS_CPP_RESOURCE_DIR=$PREFIX/lib/clang/22 \
+            -DSYSROOT_PATH=$SYSROOT_PATH \
+            -DCPPJIT_SOURCE_DIR=$PWD/cppjit \
+            -DCPPJIT_BUILD_DIR=$PWD/build-cppjit
+          emmake make -C build-xeus-cpp -j $(nproc) install
+
       - name: Build the KariLang kernel
         shell: bash -l {0}
         run: |
+          # Needs the xeus 6 port on the default branch: this environment ships
+          # xeus 6 because xeus-cpp requires it, and the pre-xeus-5 interpreter
+          # API no longer overrides anything.
           git clone --recurse-submodules https://github.com/Vipul-Cariappa/KariLang-Kernel.git
           cd KariLang-Kernel
 
@@ -52,12 +143,15 @@ jobs:
           export CMAKE_PREFIX_PATH=$PREFIX
           export CMAKE_SYSTEM_PREFIX_PATH=$PREFIX
 
-          emcmake cmake -B build \
+          # In-source on purpose: the generated parser and lexer are compiled
+          # from the source directory, so an out-of-tree build cannot find
+          # common.h or parser.tab.h.
+          emcmake cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ON \
             -DCMAKE_INSTALL_PREFIX=$PREFIX \
             .
-          emmake make -C build -j $(nproc) install
+          emmake make -j $(nproc) install
 
       - name: Build the JupyterLite site
         shell: bash -l {0}
