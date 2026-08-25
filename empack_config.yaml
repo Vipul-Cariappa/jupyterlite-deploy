@@ -1,0 +1,84 @@
+# Which files of the wasm environment end up in the site.
+packages:
+  setuptools:
+    exclude_patterns:
+    - pattern: '**/_distutils_hack/**'
+    - pattern: '**/distutils-precedence.pth'
+    - pattern: '**/setuptools/**'
+    - pattern: '**/pkg_resources/_vendor/**'
+  zlib:
+    exclude_patterns:
+    - pattern: '**/so'
+  widgetsnbextension:
+    exclude_patterns:
+    - pattern: '**'
+  numpy:
+    exclude_patterns:
+    - pattern: '**/*.pyx'
+    - pattern: '**/*.pyc'
+    - pattern: '**/*.typed'
+    - pattern: '**/*.egg-info'
+  llvm:
+    exclude_patterns:
+    - pattern: '**'
+  pyjs-dev:
+    exclude_patterns:
+    - pattern: '**'
+  nlohmann_json:
+    exclude_patterns:
+    - pattern: '**'
+  nlohmann_json-abi:
+    exclude_patterns:
+    - pattern: '**'
+  cpp-argparse:
+    exclude_patterns:
+    - pattern: '**'
+  pugixml:
+    exclude_patterns:
+    - pattern: '**'
+  doctest:
+    exclude_patterns:
+    - pattern: '**'
+  xtl:
+    exclude_patterns:
+    - pattern: '**'
+  pybind11:
+    exclude_patterns:
+    - pattern: '**'
+  pybind11_json:
+    exclude_patterns:
+    - pattern: '**'
+  emscripten-abi:
+    exclude_patterns:
+    - pattern: '**'
+  python_abi:
+    exclude_patterns:
+    - pattern: '**'
+  pytest:
+    exclude_patterns:
+    - pattern: '**'
+default:
+  exclude_patterns:
+  - pattern: bin/**
+  - pattern: '**/bin/**'
+  - pattern: tests/**
+  - pattern: '**/tests/**'
+  - pattern: '**/*.ini'
+  - pattern: '**/*.exe'
+  - pattern: '**/*.c'
+  - pattern: '**/*.pxd'
+  - pattern: '**/*.pyx'
+  - pattern: '**/*.pyc'
+  - pattern: '**/*.typed'
+  - pattern: '**/*.egg-info'
+  - pattern: '**/site-packages/pip/_vendor/**'
+  - pattern: '**/idlelib/**'
+  - pattern: '**/ensurepip/**'
+  - pattern: Scripts/*
+  - pattern: share/jupyter/nbextensions/**
+  - pattern: share/jupyter/labextensions/**
+  - pattern: etc/jupyter/nbconfig/**
+  - pattern: '**/*.a'
+  - pattern: lib/cmake/**
+  - pattern: share/cmake/**
+  - pattern: '**/*.pc'

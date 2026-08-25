@@ -160,7 +160,8 @@ jobs:
           jupyter lite build \
             --contents content \
             --output-dir dist \
-            --XeusAddon.prefix=$MAMBA_ROOT_PREFIX/envs/xeus-kernels
+            --XeusAddon.prefix=$MAMBA_ROOT_PREFIX/envs/xeus-kernels \
+            --XeusAddon.empack_config=empack_config.yaml
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
