@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Tue, 25 Aug 2026 18:50:06 +0530
+Subject: Import libcppjit with RTLD_GLOBAL under emscripten
+
+The interpreter resolves the symbols its JIT'd modules import against the
+dynamic loader's global scope, and nothing else: a library loaded RTLD_LOCAL is
+invisible to them. CPython imports extension modules local, so the dispatcher
+compiled for a Python-side override of a virtual method -- which calls into
+cppjit::cpyrt for DispatchPtr and the GIL guard -- got an import that resolved
+to nothing. Under emscripten that is a call into a null table slot: the worker
+dies, and the front end shows a kernel that is still running.
+
+The ctypes handle further down cannot fix this. Emscripten's dlopen caches by
+name and hands back the existing handle without re-applying flags, so a second
+open with RTLD_GLOBAL is a no-op -- only the first load can put the library in
+the global scope.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ python/cppjit/_cpython_cppjit.py | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/python/cppjit/_cpython_cppjit.py b/python/cppjit/_cpython_cppjit.py
+index 7ab1918..404cdfc 100644
+--- a/python/cppjit/_cpython_cppjit.py
++++ b/python/cppjit/_cpython_cppjit.py
+@@ -1,6 +1,8 @@
+ """CPython-specific touch-ups"""
+ 
+ import ctypes
++import os
++import sys
+ 
+ from . import _stdcpp_fix  # noqa: F401
+ 
+@@ -19,7 +21,25 @@ __all__ = [
+ # the merged libcppjit extension is the backend: importing it loads the
+ # C++ runtime (no separate loader.load_cpp_backend() step, which would
+ # initialize the interpreter twice)
+-import libcppjit as _backend
++if sys.platform == "emscripten":
++    # Under emscripten the JIT resolves the symbols its modules import against
++    # the loader's *global* scope only, so libcppjit has to enter that scope:
++    # the dispatcher cppjit compiles for a Python-side override calls into
++    # cppjit::cpyrt (DispatchPtr, PythonGILRAII), and a library loaded local is
++    # invisible to it -- the call lands on an unresolved import and takes the
++    # whole interpreter down. The RTLD_GLOBAL handle below cannot repair that
++    # afterwards: emscripten's dlopen caches by name and returns the existing
++    # handle without re-applying flags, so the *first* load is the only one that
++    # can be global.
++    _dlflags = sys.getdlopenflags()
++    sys.setdlopenflags(_dlflags | os.RTLD_GLOBAL)
++    try:
++        import libcppjit as _backend
++    finally:
++        sys.setdlopenflags(_dlflags)
++    del _dlflags
++else:
++    import libcppjit as _backend
+ 
+ # explicitly expose APIs from libcppjit
+ _w = ctypes.CDLL(_backend.__file__, ctypes.RTLD_GLOBAL)
+@@ -137,7 +157,6 @@ gbl.std.move = _backend.move
+ Cpp = gbl.Cpp
+ 
+ # - add to the dynamic path as needed -----------------------------------------
+-import os  # noqa: E402
+ 
+ 
+ def add_default_paths():

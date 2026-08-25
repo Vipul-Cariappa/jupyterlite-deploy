@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 09:09:57 +0530
+Subject: Stop a magic's argument from swallowing the cell's first line
+
+The cell-magic split spelled the optional argument after the magic name as
+`(?:\s.*)?`. In ECMAScript `.` excludes newlines but `\s` includes them, so on
+
+    %%python
+    import libcppjit
+    print(libcppjit)
+
+`\s` matched the newline after "python" and `.*` went on to take the whole next
+line: the magic received "python\nimport libcppjit" as its argument line and a
+body starting at `print`. The import silently never ran, and the cell failed
+with a NameError pointing at what looked like its first line.
+
+`%%python` in the demo notebook only worked because a blank line follows the
+magic -- that blank line was what got eaten. Restrict the class to spaces and
+tabs, which is all an argument on that line can be made of. The line-magic
+pattern had the same shape and the same problem.
+
+(cherry picked from commit a3234d98ad480bbfc0b92a72b310233dc99c5f08)
+---
+ include/xeus-cpp/xmanager.hpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/include/xeus-cpp/xmanager.hpp b/include/xeus-cpp/xmanager.hpp
+index 3292ce3..6bee87d 100644
+--- a/include/xeus-cpp/xmanager.hpp
++++ b/include/xeus-cpp/xmanager.hpp
+@@ -156,7 +156,9 @@ namespace xcpp
+                     kernel_res["traceback"] = nl::json::array();
+                     return;
+                 }
+-                std::regex re_magic_cell(R"(^\%{2}(\w+(?:\s.*)?)\n((?:.*\n?)*))");
++                // [ \t] rather than \s: \s matches a newline, which let the
++                // magic's own line swallow the first line of the cell body.
++                std::regex re_magic_cell(R"(^\%{2}(\w+(?:[ \t].*)?)\n((?:.*\n?)*))");
+                 std::smatch split_code;
+                 std::regex_search(code, split_code, re_magic_cell);
+                 apply(magic_name[1], split_code[1], split_code[2]);
+@@ -177,7 +179,9 @@ namespace xcpp
+                     kernel_res["traceback"] = {};
+                     return;
+                 }
+-                std::regex re_magic_line(R"(^\%(\w+(?:\s.*)?))");
++                // See above: \s here would pull the next line into the
++                // argument of a line magic.
++                std::regex re_magic_line(R"(^\%(\w+(?:[ \t].*)?))");
+                 std::smatch split_code;
+                 std::regex_search(code, split_code, re_magic_line);
+                 apply(magic_name[1], split_code[1]);

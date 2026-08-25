@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 17:31:25 +0530
+Subject: Echo the value of a `%%python` cell's last expression
+
+A Python cell that ends in an expression printed nothing, so reaching a
+C++ object from Python gave no sign it existed:
+
+    %%python
+    m = gbl.MyClass(42)
+    m
+
+PyRun_SimpleString compiles in file-input mode, which evaluates a
+trailing expression and discards the value; the single-input mode that
+would echo it rejects everything but one statement, so it cannot run a
+cell. Split the last statement off the AST instead and hand its value to
+sys.displayhook, the way IPython's `last_expr` does -- `_` history, the
+suppression of None, and any displayhook the user installs then come for
+free.
+
+The runner is compiled into a namespace of its own and held by the
+module: __main__ belongs to the cell's own code, so a runner living
+there would show up in `dir()` and would break the moment a cell rebound
+a name it needs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+(cherry picked from commit 9f236e2668ecc68043814743b7e81a60ca5e4ed5)
+---
+ src/xmagics/pythonexec.cpp | 69 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 68 insertions(+), 1 deletion(-)
+
+diff --git a/src/xmagics/pythonexec.cpp b/src/xmagics/pythonexec.cpp
+index edbe518..bdc1db8 100644
+--- a/src/xmagics/pythonexec.cpp
++++ b/src/xmagics/pythonexec.cpp
+@@ -19,6 +19,44 @@
+ namespace xcpp {
+     bool pythonexec::is_initalized = false;
+ 
++    namespace {
++        // Held here, and defined in a namespace of its own below, so that the
++        // cell cannot lose its echo: __main__ belongs to the user's code, which
++        // is free to rebind or delete anything the runner would need there.
++        PyObject* cell_runner = nullptr;
++
++        // CPython's file-input mode -- what PyRun_SimpleString uses -- evaluates
++        // a trailing expression and throws the value away. Splitting the last
++        // statement off the AST and handing it to sys.displayhook is what makes a
++        // REPL echo it; `_` history and the suppression of None come from
++        // displayhook itself.
++        constexpr const char* cell_runner_source = R"PY(
++import ast, sys, traceback
++
++def run_cell(src):
++    try:
++        tree = ast.parse(src, "<cell>", "exec")
++    except SyntaxError:
++        traceback.print_exc(limit=0)
++        return
++    ns = sys.modules["__main__"].__dict__
++    echo = (tree.body and isinstance(tree.body[-1], ast.Expr)
++            and not src.rstrip().endswith(";"))
++    try:
++        if echo:
++            last = ast.Expression(tree.body.pop().value)
++            ast.fix_missing_locations(last)
++            if tree.body:
++                exec(compile(tree, "<cell>", "exec"), ns)
++            sys.displayhook(eval(compile(last, "<cell>", "eval"), ns))
++        else:
++            exec(compile(tree, "<cell>", "exec"), ns)
++    except BaseException as e:
++        # tb_next drops this function's own frame from the report.
++        traceback.print_exception(type(e), e, e.__traceback__.tb_next)
++)PY";
++    } // namespace
++
+     void pythonexec::operator()([[maybe_unused]] const std::string& line, const std::string& cell) {
+ 
+         if (!is_initalized)
+@@ -37,7 +75,14 @@ namespace xcpp {
+         Cpp::BeginStdStreamCapture(Cpp::kStdErr);
+         Cpp::BeginStdStreamCapture(Cpp::kStdOut);
+         
+-        PyRun_SimpleString(code.c_str());
++        if (cell_runner) {
++            if (PyObject* result = PyObject_CallFunction(cell_runner, "s", code.c_str()))
++                Py_DECREF(result);
++            else
++                PyErr_Print();
++        } else {
++            PyRun_SimpleString(code.c_str());
++        }
+ 
+         // sys.stdout/sys.stderr are block-buffered when the captured fds are
+         // not a tty, so anything print() produced is still sitting in Python's
+@@ -136,6 +181,28 @@ namespace xcpp {
+                       << "\n(`%%python` cells still run; `cppjit` is unavailable)\n";
+         }
+ 
++        // The runner gets a globals() of its own instead of __main__'s, which
++        // keeps it out of the cell's `dir()` and out of reach of the cell's
++        // rebindings. The function keeps that dict alive on its own.
++        if (PyObject* runner_globals = PyDict_New()) {
++            PyDict_SetItemString(runner_globals, "__builtins__", PyImport_AddModule("builtins"));
++            if (PyObject* ran = PyRun_String(cell_runner_source, Py_file_input, runner_globals, runner_globals)) {
++                Py_DECREF(ran);
++                if (PyObject* runner = PyDict_GetItemString(runner_globals, "run_cell")) {
++                    Py_INCREF(runner);
++                    cell_runner = runner;
++                }
++            }
++            Py_DECREF(runner_globals);
++        }
++        // Losing the runner costs the cells their echo, not their ability to run
++        // -- worth a line, not worth failing initialization over.
++        if (!cell_runner) {
++            PyErr_Clear();
++            std::cerr << "Failed to install the `%%python` expression echo\n"
++                         "(cells still run; a trailing expression prints nothing)\n";
++        }
++
+         is_initalized = true;
+     }
+ } // namespace xcpp

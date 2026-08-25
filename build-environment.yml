@@ -2,21 +2,31 @@ name: build-env
 channels:
   - conda-forge
 dependencies:
-  - python
+  - python=3.12
   - pip
-  - pip:
-    - jupyterlite_xeus
-    - jupyterlite-javascript-kernel
-    # SQLite kernel (optional)
-    - jupyterlite-xeus-sqlite
-    # P5 kernel (optional)
-    - jupyterlite-p5-kernel
-    # Lua kernel (optional)
-    - jupyterlite-xeus-lua
   - jupyter_server
-  - jupyterlite-core >=0.4.1,<0.5.0
-  - jupyterlite-xeus>=2.0.0,<3
-  # pyodide kernel
-  - jupyterlite-pyodide-kernel
-  # JupyterLab: dark theme
-  - jupyterlab-night
+  - cmake
+  - make
+  # reads environment.yml in the workflow
+  - pyyaml
+  # Native LLVM, only so cppinterop-tblgen can be built: it turns CppInterOp's
+  # .td into .inc at build time and cannot run under emscripten. Same version as
+  # the wasm llvm the kernel links against.
+  - llvmdev==22.1.8
+  - pip:
+    - jupyterlite-core==0.8.3
+    - jupyterlab~=4.6.0
+    - notebook~=7.6.0
+    - jupyterlite-xeus==5.0.0
+    
+    # Python kernel
+    - jupyterlite-pyodide-kernel==0.8.5
+
+    # JavaScript kernel
+    - jupyterlite-javascript-kernel==0.3.0
+
+    # P5 kernel
+    - jupyterlite-p5-kernel==0.3.0
+
+    # JupyterLab: dark theme
+    - jupyterlab-night

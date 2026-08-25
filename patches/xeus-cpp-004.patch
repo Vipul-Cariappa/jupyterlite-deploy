@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Thu, 30 Jan 2025 10:16:55 +0530
+Subject: supporting cppyy
+
+(cherry picked from commit 0e8a778f6daec924dd2204fc86a76e8f7dea8294)
+---
+ CMakeLists.txt       | 1 +
+ src/xinterpreter.cpp | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e87d7fe..803e956 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -209,6 +209,7 @@ set(XEUS_CPP_SRC
+     src/xmagics/os.hpp
+ 
+     # magics
++    src/xmagics/multi_interpreter.cpp
+     src/xmagics/pythonexec.cpp
+ )
+ 
+diff --git a/src/xinterpreter.cpp b/src/xinterpreter.cpp
+index 65c02ed..2c73098 100644
+--- a/src/xinterpreter.cpp
++++ b/src/xinterpreter.cpp
+@@ -531,6 +531,7 @@ namespace xcpp
+         // preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("timeit",
+         // timeit(&m_interpreter));
+         preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("python", pythonexec());
++        preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("subinterp", multi_interpreter());
+         preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("file", writefile());
+ #ifndef __EMSCRIPTEN__
+         preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("xassist", xassist());

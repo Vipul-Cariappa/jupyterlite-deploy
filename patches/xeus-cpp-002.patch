@@ -1,0 +1,200 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Thu, 25 Sep 2025 16:23:34 +0200
+Subject: implement sub-interpreters
+
+(cherry picked from commit b339fd9f6fc68829d0f2bb66bb98211a59fe371e)
+---
+ CMakeLists.txt                    |  8 ++-
+ src/xinterpreter.cpp              |  2 +
+ src/xmagics/multi_interpreter.cpp | 94 +++++++++++++++++++++++++++++++
+ src/xmagics/multi_interpreter.hpp | 33 +++++++++++
+ 4 files changed, 135 insertions(+), 2 deletions(-)
+ create mode 100644 src/xmagics/multi_interpreter.cpp
+ create mode 100644 src/xmagics/multi_interpreter.hpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2436076..e87d7fe 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -105,6 +105,9 @@ if(CppInterOp_FOUND)
+   message(STATUS "Found CppInterOp: config=${CPPINTEROP_CMAKE_DIR} dir=${CPPINTEROP_INSTALL_PREFIX} (found version=${CPPINTEROP_VERSION} compatible with Clang ${CPPINTEROP_LLVM_VERSION_MAJOR}.x)")
+ endif()
+ 
++find_package(Python REQUIRED COMPONENTS Interpreter Development)
++message(STATUS "Found Python Version: ${Python_VERSION} Include: ${Python_INCLUDE_DIRS} Link: ${Python_LIBRARIES} Flags: ${Python_CFLAGS_OTHER}")
++
+ find_package(argparse REQUIRED)
+ find_package(pugixml REQUIRED)
+ 
+@@ -163,6 +166,9 @@ message("Configure kernels: ...")
+ configure_kernel("/share/jupyter/kernels/xcpp17/")
+ configure_kernel("/share/jupyter/kernels/xcpp20/")
+ configure_kernel("/share/jupyter/kernels/xcpp23/")
++configure_kernel("/share/jupyter/kernels/xcpp17-cuda/")
++configure_kernel("/share/jupyter/kernels/xcpp20-cuda/")
++configure_kernel("/share/jupyter/kernels/xcpp23-cuda/")
+ configure_kernel("/share/jupyter/kernels/xc11/")
+ configure_kernel("/share/jupyter/kernels/xc17/")
+ configure_kernel("/share/jupyter/kernels/xc23/")
+@@ -380,8 +386,6 @@ macro(xeus_cpp_create_target target_name linkage output_name)
+ 
+     # Python Stuff
+     if(NOT EMSCRIPTEN)
+-        find_package(Python COMPONENTS Interpreter Development)
+-
+         target_include_directories(${target_name} PRIVATE ${Python_INCLUDE_DIRS})
+         target_link_libraries(${target_name} PUBLIC ${Python_LIBRARIES})
+         target_compile_options(${target_name} PRIVATE ${Python_CFLAGS_OTHER})
+diff --git a/src/xinterpreter.cpp b/src/xinterpreter.cpp
+index 4ac053a..65c02ed 100644
+--- a/src/xinterpreter.cpp
++++ b/src/xinterpreter.cpp
+@@ -31,6 +31,8 @@
+ #include "xparser.hpp"
+ #include "xsystem.hpp"
+ 
++#include "xmagics/multi_interpreter.hpp"
++
+ using Args = std::vector<const char*>;
+ 
+ void* createInterpreter(const Args &ExtraArgs = {}) {
+diff --git a/src/xmagics/multi_interpreter.cpp b/src/xmagics/multi_interpreter.cpp
+new file mode 100644
+index 0000000..af06577
+--- /dev/null
++++ b/src/xmagics/multi_interpreter.cpp
+@@ -0,0 +1,94 @@
++/************************************************************************************
++ * Copyright (c) 2025, xeus-cpp contributors                                        *
++ *                                                                                  *
++ * Distributed under the terms of the BSD 3-Clause License.                         *
++ *                                                                                  *
++ * The full license is in the file LICENSE, distributed with this software.         *
++ ************************************************************************************/
++
++#include "multi_interpreter.hpp"
++
++#include <iostream>
++#include <iterator>
++#include <sstream>
++#include <string>
++#include <vector>
++
++#include "CppInterOp/CppInterOp.h"
++
++static std::vector<std::string> split(const std::string& input)
++{
++    std::istringstream buffer(input);
++    std::vector<std::string> ret(
++        (std::istream_iterator<std::string>(buffer)),
++        std::istream_iterator<std::string>()
++    );
++    return ret;
++}
++
++static constexpr size_t len(std::string_view n)
++{
++    return n.size();
++}
++
++namespace xcpp
++{
++    void multi_interpreter::operator()(const std::string& line, const std::string& cell)
++    {
++        auto Args0 = split(line.substr(len("subinterp")));
++
++        Cpp::TInterp_t OldI = Cpp::GetInterpreter();  // we need to restore the old interpreter
++        Cpp::TInterp_t I = nullptr;
++        std::string name;
++        if (Args0[0] == "--use")
++        {
++            I = interpreters[Args0[1]];
++        }
++        else
++        {
++            auto named = std::find(Args0.begin(), Args0.end(), "--name");
++            if (named != Args0.end())
++            {
++                name = *(named + 1);
++            }
++        }
++
++        std::vector<const char*> Args;
++        if (!I)
++        {
++            Args.reserve(I ? 0 : Args0.size());
++            for (auto start = Args0.begin(), end = Args0.end(); start != end; start++)
++            {
++                if (*start == "--name")
++                {
++                    start++;
++                    continue;
++                }
++                Args.push_back((*start).c_str());
++            }
++        }
++
++        Cpp::BeginStdStreamCapture(Cpp::kStdErr);
++        Cpp::BeginStdStreamCapture(Cpp::kStdOut);
++        if (!I)
++        {
++            I = Cpp::CreateInterpreter(Args);  // TODO: error handling
++        }
++        if (I)
++        {
++            Cpp::Declare(cell.c_str(), false, I);
++        }
++        std::cout << Cpp::EndStdStreamCapture();
++        std::cerr << Cpp::EndStdStreamCapture();
++
++        if (!name.empty())
++        {
++            interpreters[name] = I;          // TODO: check if this is redefinition
++            Cpp::ActivateInterpreter(OldI);  // restoring old interpreter
++        }
++        else
++        {
++            Cpp::DeleteInterpreter(I);
++        }
++    }
++}  // namespace xcpp
+diff --git a/src/xmagics/multi_interpreter.hpp b/src/xmagics/multi_interpreter.hpp
+new file mode 100644
+index 0000000..7d83a2a
+--- /dev/null
++++ b/src/xmagics/multi_interpreter.hpp
+@@ -0,0 +1,33 @@
++/************************************************************************************
++ * Copyright (c) 2025, xeus-cpp contributors                                        *
++ *                                                                                  *
++ * Distributed under the terms of the BSD 3-Clause License.                         *
++ *                                                                                  *
++ * The full license is in the file LICENSE, distributed with this software.         *
++ ************************************************************************************/
++
++#ifndef XEUS_CPP_MULTI_INTERPRETER_MAGIC_HPP
++#define XEUS_CPP_MULTI_INTERPRETER_MAGIC_HPP
++
++#include <string>
++#include <unordered_map>
++
++#include "CppInterOp/CppInterOp.h"
++#include "xeus-cpp/xmagics.hpp"
++
++namespace xcpp
++{
++    class multi_interpreter : public xmagic_cell
++    {
++    public:
++
++        XEUS_CPP_API
++        void operator()(const std::string& line, const std::string& cell) override;
++
++    private:
++
++        std::unordered_map<std::string, Cpp::TInterp_t> interpreters;
++    };
++}  // namespace xcpp
++
++#endif  // XEUS_CPP_MULTI_INTERPRETER_MAGIC_HPP

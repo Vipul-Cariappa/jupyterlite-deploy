@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Fri, 21 Aug 2026 20:38:59 +0530
+Subject: Flush Python's stream buffers before ending the capture
+
+`%%python` captured the raw file descriptors, but sys.stdout and sys.stderr
+are block-buffered when those are not a tty, so everything print() wrote
+was still in Python's own buffer when the capture ended -- and was then
+discarded. Cells that reported results by printing them appeared to run
+and produce nothing, while C++ std::cout from the same cell came through
+fine.
+
+Flush Python's wrappers and then C's before closing the capture.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit 1867247959ec2a9b61095952238ff074e01403c9)
+---
+ src/xmagics/pythonexec.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/xmagics/pythonexec.cpp b/src/xmagics/pythonexec.cpp
+index 22706aa..58e8ca9 100644
+--- a/src/xmagics/pythonexec.cpp
++++ b/src/xmagics/pythonexec.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "pythonexec.hpp"
+ #include "../xparser.hpp"
++#include <cstdio>
+ #include <string>
+ 
+ #include "Python.h"
+@@ -37,6 +38,19 @@ namespace xcpp {
+         
+         PyRun_SimpleString(code.c_str());
+ 
++        // sys.stdout/sys.stderr are block-buffered when the captured fds are
++        // not a tty, so anything print() produced is still sitting in Python's
++        // own buffer. Ending the capture here would drop it -- flush both
++        // layers first, Python's and then C's.
++        PyRun_SimpleString("import sys\n"
++                           "for _s in (sys.stdout, sys.stderr):\n"
++                           "    try:\n"
++                           "        _s.flush()\n"
++                           "    except Exception:\n"
++                           "        pass\n"
++                           "del _s\n");
++        fflush(nullptr);
++
+         std::cout << Cpp::EndStdStreamCapture();
+         std::cerr << Cpp::EndStdStreamCapture();
+     }

@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Thu, 30 Jan 2025 10:16:55 +0530
+Subject: supporting cppyy
+
+(cherry picked from commit 8544ff554228658843b1e2e2b5c63da73942a66c)
+---
+ CMakeLists.txt             | 37 ++++++++++++++++
+ environment-wasm-host.yml  |  5 +++
+ src/xinterpreter.cpp       |  3 +-
+ src/xmagics/pythonexec.cpp | 86 ++++++++++++++++++++++++++++++++++++++
+ src/xmagics/pythonexec.hpp | 30 +++++++++++++
+ 5 files changed, 160 insertions(+), 1 deletion(-)
+ create mode 100644 src/xmagics/pythonexec.cpp
+ create mode 100644 src/xmagics/pythonexec.hpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3316a7d..2436076 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -201,6 +201,9 @@ set(XEUS_CPP_SRC
+     src/xutils.cpp
+     src/xmagics/os.cpp
+     src/xmagics/os.hpp
++
++    # magics
++    src/xmagics/pythonexec.cpp
+ )
+ 
+ if(NOT EMSCRIPTEN)
+@@ -375,6 +378,31 @@ macro(xeus_cpp_create_target target_name linkage output_name)
+         target_link_libraries(${target_name} PRIVATE ${CMAKE_THREAD_LIBS_INIT})
+     endif()
+ 
++    # Python Stuff
++    if(NOT EMSCRIPTEN)
++        find_package(Python COMPONENTS Interpreter Development)
++
++        target_include_directories(${target_name} PRIVATE ${Python_INCLUDE_DIRS})
++        target_link_libraries(${target_name} PUBLIC ${Python_LIBRARIES})
++        target_compile_options(${target_name} PRIVATE ${Python_CFLAGS_OTHER})
++    else()
++        set(Python_INCLUDE_DIRS
++            "${CMAKE_PREFIX_PATH}/include/python3.11")
++        set(Python_LIBRARIES
++            "python3.11"
++            "m"
++            "bz2"
++            "libz.a"
++            "sqlite3"
++            "ffi"
++            )
++        set(Python_CFLAGS_OTHER "-sUSE_ZLIB=1" "-sUSE_BZIP2=1")
++
++        target_include_directories(${target_name} PRIVATE ${Python_INCLUDE_DIRS})
++        target_link_libraries(${target_name} PUBLIC ${Python_LIBRARIES})
++        target_compile_options(${target_name} PRIVATE ${Python_CFLAGS_OTHER})
++    endif()
++
+ endmacro()
+ 
+ # xeus-cpp-headers
+@@ -435,6 +463,7 @@ endif()
+ if(EMSCRIPTEN)
+     include(WasmBuildOptions)
+     find_package(xeus-lite ${xeus_lite_REQUIRED_VERSION} REQUIRED)
++    link_directories(BEFORE "${CMAKE_INSTALL_PREFIX}/lib")
+     add_executable(xcpp src/main_emscripten_kernel.cpp )
+     target_link_libraries(xcpp PRIVATE xeus-lite)
+     xeus_cpp_set_kernel_options(xcpp)
+@@ -447,6 +476,14 @@ if(EMSCRIPTEN)
+     target_link_options(xcpp
+         PUBLIC "SHELL: --preload-file ${ESCAPED_SYSROOT_PATH}/include@/include"
+         PUBLIC "SHELL: --preload-file ${ESCAPED_XEUS_CPP_RESOURCE_DIR}@/${CMAKE_INSTALL_LIBDIR}/clang/${CPPINTEROP_LLVM_VERSION_MAJOR}"
++        PUBLIC "SHELL: --preload-file ${CPyCppyy_DIR}/include/CPyCppyy@/include/CPyCppyy"
++        PUBLIC "SHELL: --preload-file ${CPyCppyy_BUILD_DIR}/libcppyy.so@/lib/python3.11/site-packages/libcppyy.so"
++        PUBLIC "SHELL: --preload-file ${Cppyy_Backend_DIR}/python/cppyy_backend@/lib/python3.11/site-packages/cppyy_backend"
++        PUBLIC "SHELL: --preload-file ${Cppyy_DIR}/python/cppyy@/lib/python3.11/site-packages/cppyy"
++        PUBLIC "SHELL: --preload-file ${Cppyy_DIR}/python/cppyy_compat@/lib/python3.11/site-packages/cppyy_compat"
++        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/lib/python3.11@/lib/python3.11"
++        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang@/include/clang"
++        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang-c@/include/clang-c"
+         PUBLIC "SHELL: --post-js ${CMAKE_CURRENT_SOURCE_DIR}/wasm_patches/post.js"
+     )
+ endif()
+diff --git a/environment-wasm-host.yml b/environment-wasm-host.yml
+index 19dff64..b34670b 100644
+--- a/environment-wasm-host.yml
++++ b/environment-wasm-host.yml
+@@ -11,3 +11,8 @@ dependencies:
+   - cpp-argparse
+   - pugixml
+   - doctest
++  - python=3.12
++  - bzip2
++  - zlib
++  - libffi
++  - sqlite
+diff --git a/src/xinterpreter.cpp b/src/xinterpreter.cpp
+index b191346..4ac053a 100644
+--- a/src/xinterpreter.cpp
++++ b/src/xinterpreter.cpp
+@@ -27,6 +27,7 @@
+ #ifndef __EMSCRIPTEN__
+ #include "xmagics/xassist.hpp"
+ #endif
++#include "xmagics/pythonexec.hpp"
+ #include "xparser.hpp"
+ #include "xsystem.hpp"
+ 
+@@ -527,7 +528,7 @@ namespace xcpp
+         // executable(m_interpreter));
+         // preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("timeit",
+         // timeit(&m_interpreter));
+-        // preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("python", pythonexec());
++        preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("python", pythonexec());
+         preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("file", writefile());
+ #ifndef __EMSCRIPTEN__
+         preamble_manager["magics"].get_cast<xmagics_manager>().register_magic("xassist", xassist());
+diff --git a/src/xmagics/pythonexec.cpp b/src/xmagics/pythonexec.cpp
+new file mode 100644
+index 0000000..fe85688
+--- /dev/null
++++ b/src/xmagics/pythonexec.cpp
+@@ -0,0 +1,86 @@
++/************************************************************************************
++ * Copyright (c) 2025, xeus-cpp contributors                                        *
++ *                                                                                  *
++ * Distributed under the terms of the BSD 3-Clause License.                         *
++ *                                                                                  *
++ * The full license is in the file LICENSE, distributed with this software.         *
++ ************************************************************************************/
++
++#include "pythonexec.hpp"
++#include "../xparser.hpp"
++#include <string>
++
++#include "Python.h"
++
++#include "clang/Interpreter/CppInterOp.h"
++
++namespace xcpp {
++    bool pythonexec::is_initalized = false;
++
++    void pythonexec::operator()([[maybe_unused]] const std::string& line, const std::string& cell) {
++
++        if (!is_initalized)
++            initialize();
++        if (!is_initalized) {
++            // initializing failed    
++            std::cout << Cpp::EndStdStreamCapture();
++            std::cerr << Cpp::EndStdStreamCapture();
++
++            std::cerr << "Failed to Initialize Python\n";
++            return;
++        }
++        
++        std::string code = trim(cell);
++        if (code.empty())
++            return;
++
++        Cpp::BeginStdStreamCapture(Cpp::kStdErr);
++        Cpp::BeginStdStreamCapture(Cpp::kStdOut);
++        
++        PyRun_SimpleString(code.c_str());
++
++        std::cout << Cpp::EndStdStreamCapture();
++        std::cerr << Cpp::EndStdStreamCapture();
++    }
++
++    void pythonexec::initialize() {
++#ifdef EMSCRIPTEN
++        PyStatus status;
++
++        PyConfig config;
++        PyConfig_InitPythonConfig(&config);
++        static const std::wstring prefix(L"/");
++        config.base_prefix = const_cast<wchar_t*>(prefix.c_str());
++        config.base_exec_prefix = const_cast<wchar_t*>(prefix.c_str());
++        config.prefix = const_cast<wchar_t*>(prefix.c_str());
++        config.exec_prefix = const_cast<wchar_t*>(prefix.c_str());
++
++        status = Py_InitializeFromConfig(&config);
++        if (PyStatus_Exception(status)) {
++            // TODO: initialization failed, propagate error
++            PyConfig_Clear(&config);
++            is_initalized = false;
++            return;
++        }
++        PyConfig_Clear(&config);
++#else
++        Py_Initialize();
++#endif
++
++        PyRun_SimpleString("import sys\nsys.path.append('')"); // add current directory to PYTHONPATH
++
++        // Import cppyy module
++        PyObject* cppyyModule = PyImport_ImportModule("cppyy");
++        if (!cppyyModule) {
++            PyErr_Print();
++            Py_Finalize();
++            return; // Handle import error as needed
++        }
++
++        PyObject* mainModule = PyImport_AddModule("__main__");
++        PyObject_SetAttrString(mainModule, "cppyy", cppyyModule);
++        Py_XDECREF(cppyyModule);
++
++        is_initalized = true;
++    }
++} // namespace xcpp
+diff --git a/src/xmagics/pythonexec.hpp b/src/xmagics/pythonexec.hpp
+new file mode 100644
+index 0000000..3cbf1a1
+--- /dev/null
++++ b/src/xmagics/pythonexec.hpp
+@@ -0,0 +1,30 @@
++/************************************************************************************
++ * Copyright (c) 2025, xeus-cpp contributors                                        *
++ *                                                                                  *
++ * Distributed under the terms of the BSD 3-Clause License.                         *
++ *                                                                                  *
++ * The full license is in the file LICENSE, distributed with this software.         *
++ ************************************************************************************/
++
++#ifndef XEUS_CPP_PYTHONEXEC_MAGIC_HPP
++#define XEUS_CPP_PYTHONEXEC_MAGIC_HPP
++
++#include <string>
++
++#include "xeus-cpp/xmagics.hpp"
++
++namespace xcpp
++{
++    class pythonexec : public xmagic_cell
++    {
++    public:
++        XEUS_CPP_API
++        void operator()(const std::string& line, const std::string& cell) override;
++    private:
++        static bool is_initalized;
++        void initialize();
++
++    };
++}  // namespace xcpp
++
++#endif //XEUS_CPP_PYTHONEXEC_MAGIC_HPP

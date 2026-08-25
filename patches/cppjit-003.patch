@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 10:04:39 +0530
+Subject: Key the string converters on the typedef spellings too
+
+The converter factory is a map from type spelling to converter, and for strings
+it only had the desugared forms: `std::basic_string<char>` and
+`std::basic_string_view<char>`. Which standard library is in use decides whether
+that is ever the spelling that arrives. libstdc++ desugars, so the entries match
+and this never came up. libc++ does not: `GetTypeAsString` reports
+`std::string` for the as-written type, the resolved type *and* the canonical
+type, so every lookup missed and an argument that is plainly a string fell
+through to the generic instance converter -- `could not convert argument 1:
+[InstanceConverter]` for a function taking `std::string`.
+
+Register the typedef spellings as aliases of the same converters, with the same
+set of decorations the desugared entries carry: no plain non-const reference,
+which STLStringConverter does not handle. The table already aliases several
+spellings of the same type this way.
+
+(cherry picked from commit 34228f7ecd7710eb5d593e30ff117ef98a7438c8)
+---
+ src/cpyrt/Converters.cxx | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/src/cpyrt/Converters.cxx b/src/cpyrt/Converters.cxx
+index 31ab848..eb321a8 100644
+--- a/src/cpyrt/Converters.cxx
++++ b/src/cpyrt/Converters.cxx
+@@ -4261,6 +4261,23 @@ public:
+     gf["const " STRINGVIEW "&"] = gf["std::basic_string_view<char>"];
+     gf["std::basic_string_view<char> &"] = gf["std::basic_string_view<char>"];
+     gf["const " STRINGVIEW " &"] = gf["std::basic_string_view<char>"];
++    // The typedef spellings, for standard libraries that keep them. libstdc++
++    // desugars std::string to basic_string<char> by the time the type reaches
++    // here; libc++ reports "std::string" for the as-written type, the resolved
++    // type and the canonical type alike, so none of the entries above match and
++    // an argument that is plainly a string ends up on the generic instance
++    // converter. Same set of decorations as basic_string above -- no plain
++    // non-const reference, which STLStringConverter does not handle.
++    gf["std::string"] = gf["std::basic_string<char>"];
++    gf["const std::string&"] = gf["std::basic_string<char>"];
++    gf["const std::string &"] = gf["std::basic_string<char>"];
++    gf["std::string&&"] = gf["std::basic_string<char>&&"];
++    gf["std::string &&"] = gf["std::basic_string<char>&&"];
++    gf["std::string_view"] = gf["std::basic_string_view<char>"];
++    gf["std::string_view&"] = gf["std::basic_string_view<char>"];
++    gf["std::string_view &"] = gf["std::basic_string_view<char>"];
++    gf["const std::string_view&"] = gf["std::basic_string_view<char>"];
++    gf["const std::string_view &"] = gf["std::basic_string_view<char>"];
+     gf["std::wstring"] =
+         (cf_t) + [](cdims_t) { return new STLWStringConverter{}; };
+     gf[WSTRING1] = gf["std::wstring"];

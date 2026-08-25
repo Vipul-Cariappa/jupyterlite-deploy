@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 08:41:44 +0530
+Subject: Point the wasm kernel's embedded Python at cppjit
+
+The wasm build still preloaded the cppyy stack into site-packages -- libcppyy
+plus three separate python packages -- while the `%%python` magic has since been
+rewritten to import cppjit. cppjit ships one extension module and one package,
+so the five preloads collapse to four, and the cpyrt headers replace CPyCppyy's
+as what the interpreter needs on its include path once a cell defines a Python
+subclass of a C++ type.
+
+CPython moves 3.11 -> 3.13, because that is what emscripten-forge has for
+emscripten-wasm32 now. The version is a cache variable rather than a literal
+repeated across seven lines, since it has to agree with the installed python
+package and appears in every site-packages path.
+
+The library list is what took the work. All of CPython's optional extension
+modules are compiled into libpython3.13.a here rather than shipped as loadable
+modules under lib-dynload, and MAIN_MODULE links every archive member, so each
+one's dependencies must be on the link line: _bz2module, zlib, _lzmamodule,
+_sqlite3, _ssl and _ctypes between them need bz2, z, lzma, sqlite3, ssl, crypto
+and ffi. Nothing pulls in uuid, readline or ncurses, and adding them only drags
+in their own unresolved dependencies. expat and mpdec have to stay out:
+libpython bundles both, under PyExpat_* names and in _decimal respectively, and
+the packaged copies collide.
+
+Those are spelled as full archive paths rather than -l names because under
+MAIN_MODULE a `-lfoo` found in a -L directory does not actually get linked --
+wasm-ld quietly turns the references into dynamic imports, and the only symptom
+is a wall of "undefined symbol ... referenced by root reference" from the JS
+side after wasm-ld has already reported success.
+
+find_package(Python) is skipped entirely when cross-compiling: it looks for a
+host interpreter, which the kernel has no use for and which cannot be found
+inside the emscripten sysroot anyway.
+
+(cherry picked from commit b81b4438c380824d8a082be70ab7626719e36bbc)
+---
+ CMakeLists.txt | 65 ++++++++++++++++++++++++++++++++++++--------------
+ 1 file changed, 47 insertions(+), 18 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 803e956..47ad953 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -83,6 +83,12 @@ if(EMSCRIPTEN)
+     set(EMSCRIPTEN_FEATURES "${EMSCRIPTEN_FEATURES} -s \"EXPORTED_RUNTIME_METHODS=[ENV']\"")
+     set(XEUS_CPP_WASM_KERNEL_EXTRA_FLAGS "-fwasm-exceptions" CACHE STRING "Extra compiler/linker flags for wasm builds")
+     set(XEUS_CPP_WASM_KERNEL_EXTRA_ARGS "-fwasm-exceptions;-mllvm;-wasm-enable-sjlj" CACHE STRING "Extra argv entries for wasm kernel.json")
++    # The CPython the kernel embeds, and the site-packages layout the `%%python`
++    # magic imports cppjit from. Has to match the python package installed for
++    # emscripten-wasm32 in CMAKE_PREFIX_PATH.
++    set(XEUS_CPP_WASM_PYTHON_VERSION "3.13" CACHE STRING "Version of the wasm CPython to embed")
++    set(CPPJIT_SOURCE_DIR "" CACHE PATH "cppjit checkout supplying the python packages and cpyrt headers")
++    set(CPPJIT_BUILD_DIR "" CACHE PATH "cppjit wasm build directory holding libcppjit.so")
+ endif()
+ 
+ # Dependencies
+@@ -105,8 +111,13 @@ if(CppInterOp_FOUND)
+   message(STATUS "Found CppInterOp: config=${CPPINTEROP_CMAKE_DIR} dir=${CPPINTEROP_INSTALL_PREFIX} (found version=${CPPINTEROP_VERSION} compatible with Clang ${CPPINTEROP_LLVM_VERSION_MAJOR}.x)")
+ endif()
+ 
+-find_package(Python REQUIRED COMPONENTS Interpreter Development)
+-message(STATUS "Found Python Version: ${Python_VERSION} Include: ${Python_INCLUDE_DIRS} Link: ${Python_LIBRARIES} Flags: ${Python_CFLAGS_OTHER}")
++# FindPython looks for a host interpreter, which a cross build to emscripten has
++# no use for and cannot find inside the sysroot anyway. The wasm CPython the
++# kernel embeds is spelled out in xeus_cpp_set_kernel_options instead.
++if(NOT EMSCRIPTEN)
++    find_package(Python REQUIRED COMPONENTS Interpreter Development)
++    message(STATUS "Found Python Version: ${Python_VERSION} Include: ${Python_INCLUDE_DIRS} Link: ${Python_LIBRARIES} Flags: ${Python_CFLAGS_OTHER}")
++endif()
+ 
+ find_package(argparse REQUIRED)
+ find_package(pugixml REQUIRED)
+@@ -392,16 +403,35 @@ macro(xeus_cpp_create_target target_name linkage output_name)
+         target_compile_options(${target_name} PRIVATE ${Python_CFLAGS_OTHER})
+     else()
+         set(Python_INCLUDE_DIRS
+-            "${CMAKE_PREFIX_PATH}/include/python3.11")
+-        set(Python_LIBRARIES
+-            "python3.11"
+-            "m"
+-            "bz2"
+-            "libz.a"
+-            "sqlite3"
+-            "ffi"
+-            )
+-        set(Python_CFLAGS_OTHER "-sUSE_ZLIB=1" "-sUSE_BZIP2=1")
++            "${CMAKE_PREFIX_PATH}/include/python${XEUS_CPP_WASM_PYTHON_VERSION}")
++        # Everything the static libpython pulls in through its built-in
++        # extension modules -- they are all compiled into libpython3.x.a here,
++        # not shipped as loadable modules under lib-dynload, and MAIN_MODULE
++        # links every archive member, so each one's dependencies have to be
++        # present. expat is deliberately absent: libpython bundles its own copy
++        # under PyExpat_* names and adding the package's would collide, and so does
++        # mpdec for _decimal.
++        #
++        # Spelled as full paths rather than -l names on purpose. Under
++        # MAIN_MODULE a `-lfoo` that resolves into a -L directory does not get
++        # linked -- wasm-ld turns the references into dynamic imports instead,
++        # and the failure only surfaces at the end as a wall of "undefined
++        # symbol ... referenced by root reference".
++        # Exactly what libpython's bundled modules reference: _bz2module, zlib,
++        # _lzmamodule, _sqlite3, _ssl and _ctypes. uuid, readline and ncurses are
++        # not compiled in, and adding them would only drag in their own
++        # unresolved dependencies.
++        set(_wasm_python_libs
++            "python${XEUS_CPP_WASM_PYTHON_VERSION}"
++            bz2 z lzma sqlite3 ssl crypto ffi)
++        set(Python_LIBRARIES "m")
++        foreach(_lib IN LISTS _wasm_python_libs)
++            set(_archive "${CMAKE_PREFIX_PATH}/lib/lib${_lib}.a")
++            if(NOT EXISTS "${_archive}")
++                message(FATAL_ERROR "Missing wasm archive ${_archive}")
++            endif()
++            list(APPEND Python_LIBRARIES "${_archive}")
++        endforeach()
+ 
+         target_include_directories(${target_name} PRIVATE ${Python_INCLUDE_DIRS})
+         target_link_libraries(${target_name} PUBLIC ${Python_LIBRARIES})
+@@ -481,12 +511,11 @@ if(EMSCRIPTEN)
+     target_link_options(xcpp
+         PUBLIC "SHELL: --preload-file ${ESCAPED_SYSROOT_PATH}/include@/include"
+         PUBLIC "SHELL: --preload-file ${ESCAPED_XEUS_CPP_RESOURCE_DIR}@/${CMAKE_INSTALL_LIBDIR}/clang/${CPPINTEROP_LLVM_VERSION_MAJOR}"
+-        PUBLIC "SHELL: --preload-file ${CPyCppyy_DIR}/include/CPyCppyy@/include/CPyCppyy"
+-        PUBLIC "SHELL: --preload-file ${CPyCppyy_BUILD_DIR}/libcppyy.so@/lib/python3.11/site-packages/libcppyy.so"
+-        PUBLIC "SHELL: --preload-file ${Cppyy_Backend_DIR}/python/cppyy_backend@/lib/python3.11/site-packages/cppyy_backend"
+-        PUBLIC "SHELL: --preload-file ${Cppyy_DIR}/python/cppyy@/lib/python3.11/site-packages/cppyy"
+-        PUBLIC "SHELL: --preload-file ${Cppyy_DIR}/python/cppyy_compat@/lib/python3.11/site-packages/cppyy_compat"
+-        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/lib/python3.11@/lib/python3.11"
++        PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/src/cpyrt@/include/cpyrt"
++        PUBLIC "SHELL: --preload-file ${CPPJIT_BUILD_DIR}/libcppjit.so@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/libcppjit.so"
++        PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit"
++        PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit_backend@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit_backend"
++        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}"
+         PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang@/include/clang"
+         PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang-c@/include/clang-c"
+         PUBLIC "SHELL: --post-js ${CMAKE_CURRENT_SOURCE_DIR}/wasm_patches/post.js"

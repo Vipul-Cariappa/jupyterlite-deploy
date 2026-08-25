@@ -1,0 +1,291 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 08:27:55 +0530
+Subject: Build libcppjit as a wasm side module
+
+cppjit's build assumed a host toolchain in three places that a cross build to
+emscripten cannot satisfy.
+
+Python: find_package(Python COMPONENTS Development) resolves the *host*
+interpreter, whose headers are the wrong architecture. Cross builds take the
+headers from the wasm CPython in the emscripten prefix instead, and link no
+libpython at all -- a side module leaves the CPython symbols undefined for the
+main module that embeds the interpreter to resolve at load time.
+
+CppInterOp: the ExternalProject cannot drive the emscripten build, which needs
+its own emcmake invocation and a natively-built cppinterop-tblgen to turn the
+.td files into .inc. CPPJIT_USE_PREBUILT_CPPINTEROP points cppjit at an install
+that already exists. That also makes the LLVM and Clang discovery unnecessary,
+which is what lets the configure succeed at all here: the emscripten-forge
+ClangConfig.cmake references lld targets, so it reports Clang as not found
+unless LLD was found first, and libcppjit needs neither package -- it compiles
+against CppInterOp's headers and links no LLVM or Clang library.
+
+Target: emscripten's CMake platform module declares no shared-library support,
+so a SHARED target would quietly have become static. The exception model has to
+match the one CppInterOp and the hosting kernel were built with, or the tables
+do not line up.
+
+The two runtime paths baked into the library also stop being host paths. The
+library name is now the one the kernel's main module already records its
+dependency under, so dlopen hands back that same module rather than loading a
+second copy of CppInterOp -- and with it a second interpreter. The include
+directory is where the headers were preloaded into the browser's virtual
+filesystem, not where they sit on the build machine.
+
+(cherry picked from commit 1522e8d044236ba350d2b9b427cd710eb0345dc9)
+---
+ CMakeLists.txt | 205 ++++++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 161 insertions(+), 44 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9676cea..d58b328 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -15,15 +15,52 @@ set(CPPINTEROP_GIT_REPOSITORY "https://github.com/compiler-research/CppInterOp.g
+ set(CPPINTEROP_GIT_TAG "8d624c621a4b95e36ff73ac708c85a768287478f" CACHE STRING "")
+ set(CPPINTEROP_SOURCE_DIR "" CACHE PATH
+     "Override default CppInterOp built by ExternalProject_Add, with a path to local CppInterOp source")
++option(CPPJIT_USE_PREBUILT_CPPINTEROP
++       "Use the CppInterOp already installed under CPPINTEROP_INSTALL_DIR instead of building it" OFF)
+ 
+-set(Python_FIND_VIRTUALENV ONLY)
+-find_package(Python COMPONENTS Interpreter Development)
+-if(NOT Python_FOUND)
++if(EMSCRIPTEN)
++    # Cross-compiling: the host interpreter only answers cmake-time queries, so
++    # ask for nothing else from it. The headers to compile against are the wasm
++    # CPython in the emscripten prefix, and a side module needs no libpython at
++    # all -- it leaves the CPython symbols undefined for the main module that
++    # embeds the interpreter to resolve at load time.
+     set(Python_FIND_VIRTUALENV STANDARD)
++    find_package(Python COMPONENTS Interpreter REQUIRED)
++
++    set(CPPJIT_WASM_PYTHON_INCLUDE_DIR "" CACHE PATH
++        "Include directory of the wasm CPython to compile against; searched under CMAKE_PREFIX_PATH when empty")
++    if(NOT CPPJIT_WASM_PYTHON_INCLUDE_DIR)
++        foreach(_prefix IN LISTS CMAKE_PREFIX_PATH CMAKE_SYSTEM_PREFIX_PATH)
++            file(GLOB _candidates "${_prefix}/include/python3.*")
++            foreach(_candidate IN LISTS _candidates)
++                if(EXISTS "${_candidate}/Python.h")
++                    set(CPPJIT_WASM_PYTHON_INCLUDE_DIR "${_candidate}")
++                    break()
++                endif()
++            endforeach()
++            if(CPPJIT_WASM_PYTHON_INCLUDE_DIR)
++                break()
++            endif()
++        endforeach()
++    endif()
++    if(NOT CPPJIT_WASM_PYTHON_INCLUDE_DIR)
++        message(FATAL_ERROR
++            "No wasm CPython headers found. Install a python package for "
++            "emscripten-wasm32 into the prefix on CMAKE_PREFIX_PATH, or pass "
++            "-DCPPJIT_WASM_PYTHON_INCLUDE_DIR=<prefix>/include/python3.x")
++    endif()
++    message(STATUS "Wasm CPython headers: ${CPPJIT_WASM_PYTHON_INCLUDE_DIR}")
++    set(Python_INCLUDE_DIRS "${CPPJIT_WASM_PYTHON_INCLUDE_DIR}")
++else()
++    set(Python_FIND_VIRTUALENV ONLY)
+     find_package(Python COMPONENTS Interpreter Development)
+-endif()
+-if(NOT Python_Development_FOUND)
+-    message(FATAL_ERROR "Python development headers not found")
++    if(NOT Python_FOUND)
++        set(Python_FIND_VIRTUALENV STANDARD)
++        find_package(Python COMPONENTS Interpreter Development)
++    endif()
++    if(NOT Python_Development_FOUND)
++        message(FATAL_ERROR "Python development headers not found")
++    endif()
+ endif()
+ 
+ # The LLVM range the pinned CppInterOp supports; update together with the tag.
+@@ -47,44 +84,76 @@ if(DEFINED LLVM_DIR)
+             "No LLVMConfig.cmake under LLVM_DIR (${_llvm_dir_arg}); expected "
+             "<install prefix or build tree>/lib/cmake/llvm")
+     endif()
+-else()
+-    find_package(LLVM CONFIG QUIET HINTS ${_llvm_hints})
+-    if(NOT LLVM_FOUND)
+-        message(FATAL_ERROR
+-            "No LLVM CMake package found. Install LLVM "
+-            "${CPPJIT_LLVM_VERSION_MIN}-${CPPJIT_LLVM_VERSION_MAX} development packages "
+-            "(apt: llvm-${CPPJIT_LLVM_VERSION_MAX}-dev libclang-${CPPJIT_LLVM_VERSION_MAX}-dev; "
+-            "conda: llvmdev clangdev), or point cppjit at your own LLVM build with "
+-            "-DLLVM_DIR=<prefix or build tree>/lib/cmake/llvm "
+-            "(pip: --config-settings=cmake.define.LLVM_DIR=...)")
++    if(NOT Python_Development_FOUND)
++        message(FATAL_ERROR "Python development headers not found")
+     endif()
+ endif()
+ 
+-message(STATUS "Found LLVM ${LLVM_VERSION} at ${LLVM_DIR}")
+-if(LLVM_VERSION_MAJOR LESS CPPJIT_LLVM_VERSION_MIN OR
+-   LLVM_VERSION_MAJOR GREATER CPPJIT_LLVM_VERSION_MAX)
+-    message(FATAL_ERROR
+-        "LLVM ${LLVM_VERSION} is unsupported: the currently supported "
+-        "CppInterOp version (${CPPINTEROP_GIT_TAG}) only supports LLVM "
+-        "${CPPJIT_LLVM_VERSION_MIN}-${CPPJIT_LLVM_VERSION_MAX}")
+-endif()
++# Nothing here is needed when CppInterOp is not built from source: the
++# discovery exists to version-check the LLVM the sub-build will use and to
++# forward LLVM_DIR/Clang_DIR to it. libcppjit itself compiles against
++# CppInterOp's headers alone and links no LLVM or Clang library.
++if(NOT CPPJIT_USE_PREBUILT_CPPINTEROP)
++    # The LLVM range the pinned CppInterOp supports; update together with the tag.
++    set(CPPJIT_LLVM_VERSION_MIN 20)
++    set(CPPJIT_LLVM_VERSION_MAX 23)
++
++    set(_llvm_hints "")
++
++    if(DEFINED ENV{CONDA_PREFIX})
++        list(APPEND _llvm_hints "$ENV{CONDA_PREFIX}/lib/cmake/llvm")
++    endif()
++
++    if(DEFINED LLVM_DIR)
++        # An explicit LLVM_DIR is authoritative: fail instead of falling back to a
++        # different LLVM than the one requested. A failed find_package resets
++        # LLVM_DIR to -NOTFOUND, so keep the requested value for the message.
++        set(_llvm_dir_arg "${LLVM_DIR}")
++        find_package(LLVM CONFIG PATHS "${LLVM_DIR}" NO_DEFAULT_PATH)
++        if(NOT LLVM_FOUND)
++            message(FATAL_ERROR
++                "No LLVMConfig.cmake under LLVM_DIR (${_llvm_dir_arg}); expected "
++                "<install prefix or build tree>/lib/cmake/llvm")
++        endif()
++    else()
++        find_package(LLVM CONFIG QUIET HINTS ${_llvm_hints})
++        if(NOT LLVM_FOUND)
++            message(FATAL_ERROR
++                "No LLVM CMake package found. Install LLVM "
++                "${CPPJIT_LLVM_VERSION_MIN}-${CPPJIT_LLVM_VERSION_MAX} development packages "
++                "(apt: llvm-${CPPJIT_LLVM_VERSION_MAX}-dev libclang-${CPPJIT_LLVM_VERSION_MAX}-dev; "
++                "conda: llvmdev clangdev), or point cppjit at your own LLVM build with "
++                "-DLLVM_DIR=<prefix or build tree>/lib/cmake/llvm "
++                "(pip: --config-settings=cmake.define.LLVM_DIR=...)")
++        endif()
++    endif()
+ 
+-if(DEFINED Clang_DIR)
+-    # An explicit Clang_DIR is authoritative, like LLVM_DIR above.
+-    set(_clang_dir_arg "${Clang_DIR}")
+-    find_package(Clang CONFIG PATHS "${Clang_DIR}" NO_DEFAULT_PATH)
+-    if(NOT Clang_FOUND)
++    message(STATUS "Found LLVM ${LLVM_VERSION} at ${LLVM_DIR}")
++    if(LLVM_VERSION_MAJOR LESS CPPJIT_LLVM_VERSION_MIN OR
++       LLVM_VERSION_MAJOR GREATER CPPJIT_LLVM_VERSION_MAX)
+         message(FATAL_ERROR
+-            "No ClangConfig.cmake under Clang_DIR (${_clang_dir_arg}); expected "
+-            "<install prefix or build tree>/lib/cmake/clang")
++            "LLVM ${LLVM_VERSION} is unsupported: the currently supported "
++            "CppInterOp version (${CPPINTEROP_GIT_TAG}) only supports LLVM "
++            "${CPPJIT_LLVM_VERSION_MIN}-${CPPJIT_LLVM_VERSION_MAX}")
++    endif()
++
++    if(DEFINED Clang_DIR)
++        # An explicit Clang_DIR is authoritative, like LLVM_DIR above.
++        set(_clang_dir_arg "${Clang_DIR}")
++        find_package(Clang CONFIG PATHS "${Clang_DIR}" NO_DEFAULT_PATH)
++        if(NOT Clang_FOUND)
++            message(FATAL_ERROR
++                "No ClangConfig.cmake under Clang_DIR (${_clang_dir_arg}); expected "
++                "<install prefix or build tree>/lib/cmake/clang")
++        endif()
++    else()
++        # Clang's package sits beside LLVM's in every supported layout; search
++        # only there so an unrelated system clang cannot satisfy the lookup.
++        find_package(Clang CONFIG QUIET HINTS "${LLVM_DIR}/../clang" NO_DEFAULT_PATH)
++    endif()
++    if(Clang_FOUND)
++        message(STATUS "Found Clang at ${Clang_DIR}")
+     endif()
+-else()
+-    # Clang's package sits beside LLVM's in every supported layout; search
+-    # only there so an unrelated system clang cannot satisfy the lookup.
+-    find_package(Clang CONFIG QUIET HINTS "${LLVM_DIR}/../clang" NO_DEFAULT_PATH)
+-endif()
+-if(Clang_FOUND)
+-    message(STATUS "Found Clang at ${Clang_DIR}")
+ endif()
+ 
+ # CppInterOp is installed at the location cppjit ships at runtime: ask for the
+@@ -109,9 +178,22 @@ if(NOT CPPINTEROP_INSTALL_DIR)
+ endif()
+ message(STATUS "CppInterOp install/load prefix: ${CPPINTEROP_INSTALL_DIR}")
+ 
+-# Include cmake for CppInterOp config and build using ExternalProject.
+-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AddCppInterOp.cmake)
+-cppjit_add_cppinterop()
++# Include cmake for CppInterOp config and build using ExternalProject. A
++# CppInterOp that is already installed under CPPINTEROP_INSTALL_DIR can stand in
++# for that: the emscripten build in particular needs its own emcmake invocation
++# and a native cppinterop-tblgen, neither of which the ExternalProject can drive.
++if(CPPJIT_USE_PREBUILT_CPPINTEROP)
++    if(NOT EXISTS "${CPPINTEROP_INSTALL_DIR}/include/CppInterOp/CppInterOp.h")
++        message(FATAL_ERROR
++            "CPPJIT_USE_PREBUILT_CPPINTEROP is on but no CppInterOp install was "
++            "found at ${CPPINTEROP_INSTALL_DIR}")
++    endif()
++    message(STATUS "CppInterOp: using the prebuilt install at ${CPPINTEROP_INSTALL_DIR}")
++    add_custom_target(CppInterOp)
++else()
++    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AddCppInterOp.cmake)
++    cppjit_add_cppinterop()
++endif()
+ 
+ # this libcppjit.so merges both cpyrt and the interop wrapper
+ file(GLOB CPYRT_SOURCES CONFIGURE_DEPENDS src/cpyrt/*.cxx)
+@@ -120,14 +202,49 @@ set(INTEROP_SOURCES
+     src/interop/cppinterop_dispatch.cxx
+ )
+ 
++if(EMSCRIPTEN)
++    # The emscripten CMake platform module declares no shared-library support,
++    # so a SHARED target would silently become static.
++    set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS TRUE)
++endif()
++
+ add_library(cppjit SHARED ${CPYRT_SOURCES} ${INTEROP_SOURCES})
+ add_dependencies(cppjit CppInterOp)
+ 
++if(EMSCRIPTEN)
++    # libcppjit.so becomes a wasm side module the embedding kernel's CPython
++    # dlopens. Its libpython and CppInterOp symbols stay undefined on purpose:
++    # the main module already carries both, and resolving them here would give
++    # cppjit a second interpreter. The exception model has to match the one
++    # CppInterOp and the kernel were built with, or the tables do not line up.
++    set(CPPJIT_WASM_FLAGS -fPIC -fwasm-exceptions)
++    target_compile_options(cppjit PRIVATE ${CPPJIT_WASM_FLAGS})
++    target_link_options(cppjit PRIVATE ${CPPJIT_WASM_FLAGS} -sSIDE_MODULE=1)
++    set_target_properties(cppjit PROPERTIES SUFFIX ".so")
++endif()
++
+ # The exact library file the wrapper dlopens and the include dir the
+-# interpreter boot requires.
++# interpreter boot requires. Under emscripten neither is a host path: the
++# library is named the way the kernel's main module already records its
++# dependency, so dlopen hands back that module instead of loading a second
++# copy, and the headers live wherever they were preloaded into the browser's
++# virtual filesystem.
++if(EMSCRIPTEN)
++    set(CPPJIT_RUNTIME_CPPINTEROP_LIBRARY "libclangCppInterOp.so" CACHE STRING
++        "Library name/path cppjit dlopens CppInterOp through at runtime")
++    set(CPPJIT_RUNTIME_INCLUDE_DIR "/include" CACHE PATH
++        "Include directory cppjit hands the interpreter at runtime")
++else()
++    set(CPPJIT_RUNTIME_CPPINTEROP_LIBRARY
++        "${CPPINTEROP_INSTALL_DIR}/lib/libclangCppInterOp${CMAKE_SHARED_LIBRARY_SUFFIX}"
++        CACHE STRING "Library name/path cppjit dlopens CppInterOp through at runtime")
++    set(CPPJIT_RUNTIME_INCLUDE_DIR "${CPPINTEROP_INSTALL_DIR}/include" CACHE PATH
++        "Include directory cppjit hands the interpreter at runtime")
++endif()
++
+ target_compile_definitions(cppjit PRIVATE
+-    CPPINTEROP_LIBRARY="${CPPINTEROP_INSTALL_DIR}/lib/libclangCppInterOp${CMAKE_SHARED_LIBRARY_SUFFIX}"
+-    CPPINTEROP_INCLUDE_DIR="${CPPINTEROP_INSTALL_DIR}/include"
++    CPPINTEROP_LIBRARY="${CPPJIT_RUNTIME_CPPINTEROP_LIBRARY}"
++    CPPINTEROP_INCLUDE_DIR="${CPPJIT_RUNTIME_INCLUDE_DIR}"
+ )
+ 
+ target_include_directories(cppjit PRIVATE

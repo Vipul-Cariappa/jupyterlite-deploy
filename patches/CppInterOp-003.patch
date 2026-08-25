@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 10:17:47 +0530
+Subject: Look symbols up by IR name when the linker name misses
+
+getAddressOfGlobal resolved a symbol by its linker name only, carrying a
+`// TODO: Or getSymbolAddress` on the line. Which of the two spellings works
+depends on the executor, and the wasm one resolves symbols with dlsym, where
+only IR names exist -- so every linker-name lookup missed everything the JIT
+had produced.
+
+compileFunction is what makes that fatal. It parses the wrapper, then asks
+getAddressOfGlobal for it, and returns null if the lookup comes up empty -- with
+no diagnostic, because nothing failed to compile. JitCall then reports
+"TClingCallFunc::make_wrapper:Failed to compile" and dumps source that is
+perfectly valid; feeding that same text to Declare and looking the symbol up by
+IR name hands back an address. The effect was that MakeFunctionCallable failed
+for *every* function under wasm, `int add(int, int)` included, so nothing built
+on JitCall could call anything.
+
+Try the linker name first, exactly as before, and fall back to the IR name
+before giving up. Where the linker name already resolves, the fallback never
+runs.
+
+(cherry picked from commit 1f16f33a2c7a87acb187724d82106e732fa1e021)
+---
+ lib/CppInterOp/CppInterOpInterpreter.h | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/lib/CppInterOp/CppInterOpInterpreter.h b/lib/CppInterOp/CppInterOpInterpreter.h
+index cd3a9ba..ede6339 100644
+--- a/lib/CppInterOp/CppInterOpInterpreter.h
++++ b/lib/CppInterOp/CppInterOpInterpreter.h
+@@ -433,12 +433,22 @@ public:
+     if (isInSyntaxOnlyMode())
+       return nullptr;
+ 
+-    auto addressOrErr =
+-        getSymbolAddressFromLinkerName(SymName); // TODO: Or getSymbolAddress
++    auto addressOrErr = getSymbolAddressFromLinkerName(SymName);
+     if (addressOrErr)
+       return addressOrErr->toPtr<void*>();
+-
+-    llvm::consumeError(addressOrErr.takeError()); // okay to be missing
++    llvm::consumeError(addressOrErr.takeError());
++
++    // Fall back to the IR name. Which of the two spellings resolves depends on
++    // the executor: the wasm one looks symbols up with dlsym and only ever sees
++    // IR names, so a linker-name lookup misses everything the JIT produced.
++    // compileFunction leans on this to hand back the wrapper it just built, and
++    // a miss there is silent -- it reports the compile as failed, for code that
++    // compiled cleanly.
++    auto irOrErr = getSymbolAddress(SymName);
++    if (irOrErr)
++      return irOrErr->toPtr<void*>();
++
++    llvm::consumeError(irOrErr.takeError()); // okay to be missing
+     return nullptr;
+   }
+ 

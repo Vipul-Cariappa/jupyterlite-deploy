@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Fri, 21 Aug 2026 19:48:58 +0530
+Subject: Drive the `%%python` magic with cppjit
+
+cppyy's role here -- reflecting the kernel's own translation unit into
+Python -- is now cppjit's, and cppjit attaches to the interpreter
+CppInterOp already holds rather than creating one, which is what makes the
+magic share state with the C++ cells around it.
+
+Also fix the CppInterOp include to the current `CppInterOp/CppInterOp.h`
+path; the old `clang/Interpreter/` location no longer exists.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit e7d39debdba4b35813354935318b1b0a9a41ff3e)
+---
+ src/xmagics/pythonexec.cpp | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/src/xmagics/pythonexec.cpp b/src/xmagics/pythonexec.cpp
+index fe85688..5a7bfc0 100644
+--- a/src/xmagics/pythonexec.cpp
++++ b/src/xmagics/pythonexec.cpp
+@@ -12,7 +12,7 @@
+ 
+ #include "Python.h"
+ 
+-#include "clang/Interpreter/CppInterOp.h"
++#include "CppInterOp/CppInterOp.h"
+ 
+ namespace xcpp {
+     bool pythonexec::is_initalized = false;
+@@ -69,17 +69,19 @@ namespace xcpp {
+ 
+         PyRun_SimpleString("import sys\nsys.path.append('')"); // add current directory to PYTHONPATH
+ 
+-        // Import cppyy module
+-        PyObject* cppyyModule = PyImport_ImportModule("cppyy");
+-        if (!cppyyModule) {
++        // cppjit binds against whichever interpreter CppInterOp already has,
++        // so importing it here hands the Python side this kernel's own
++        // translation unit rather than a fresh one.
++        PyObject* cppjitModule = PyImport_ImportModule("cppjit");
++        if (!cppjitModule) {
+             PyErr_Print();
+             Py_Finalize();
+             return; // Handle import error as needed
+         }
+ 
+         PyObject* mainModule = PyImport_AddModule("__main__");
+-        PyObject_SetAttrString(mainModule, "cppyy", cppyyModule);
+-        Py_XDECREF(cppyyModule);
++        PyObject_SetAttrString(mainModule, "cppjit", cppjitModule);
++        Py_XDECREF(cppjitModule);
+ 
+         is_initalized = true;
+     }

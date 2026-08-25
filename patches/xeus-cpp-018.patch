@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Tue, 25 Aug 2026 19:41:11 +0530
+Subject: Keep other kernels out of the wasm filesystem image
+
+The kernel preloaded the whole of the prefix lib/python3.x, which in a
+deployment that also ships a python kernel means every megabyte of numpy,
+scipy, pandas, sympy, scikit-learn and matplotlib -- 199MB of site-packages --
+landed inside xcpp.data, where nothing could ever read it. What the kernel needs
+is the standard library; cppjit own packages are preloaded individually. The
+CPython test suite and the tkinter/idle trees go too: a browser has no use for
+them.
+
+Clang API headers become opt-in for the same reason. They are 32MB of the image
+and only a notebook that includes clang itself can use them, so a deployment
+that runs C++ leaves them out and passes
+-DXEUS_CPP_WASM_PRELOAD_CLANG_HEADERS=ON when it wants them.
+
+Measured on a demo notebook run: xcpp.data 249MB -> 39MB.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ CMakeLists.txt | 34 +++++++++++++++++++++++++++++++---
+ 1 file changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b7e77d1..47e3af2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -520,6 +520,36 @@ if(EMSCRIPTEN)
+     string(REPLACE "@" "@@" ESCAPED_XEUS_CPP_RESOURCE_DIR "${XEUS_CPP_RESOURCE_DIR}")
+     string(REPLACE "\\" "/" ESCAPED_XEUS_CPP_RESOURCE_DIR "${ESCAPED_XEUS_CPP_RESOURCE_DIR}")
+     string(REPLACE "\\" "/" ESCAPED_SYSROOT_PATH "${ESCAPED_SYSROOT_PATH}")
++    # The prefix's site-packages belong to whatever other kernels share this
++    # environment, and preloading them here would put every one of their
++    # megabytes inside xcpp.data -- 199MB of numpy, scipy, pandas and friends in
++    # the measurement that prompted this. The kernel needs the standard library
++    # only; cppjit's own packages are preloaded individually below. The test
++    # suite and the tkinter/idle GUI trees have no use in a browser either.
++    set(XEUS_CPP_WASM_STDLIB_STAGE
++        "${CMAKE_CURRENT_BINARY_DIR}/wasm_stdlib/python${XEUS_CPP_WASM_PYTHON_VERSION}")
++    file(REMOVE_RECURSE "${XEUS_CPP_WASM_STDLIB_STAGE}")
++    file(COPY "${CMAKE_PREFIX_PATH}/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/"
++        DESTINATION "${XEUS_CPP_WASM_STDLIB_STAGE}"
++        PATTERN "site-packages" EXCLUDE
++        PATTERN "test" EXCLUDE
++        PATTERN "idlelib" EXCLUDE
++        PATTERN "tkinter" EXCLUDE
++        PATTERN "turtledemo" EXCLUDE
++        PATTERN "__pycache__" EXCLUDE
++    )
++
++    # Clang's own API headers, for a notebook that means to #include clang. They
++    # are 32MB of xcpp.data, so a deployment that only runs C++ leaves them out.
++    option(XEUS_CPP_WASM_PRELOAD_CLANG_HEADERS
++        "Preload clang's API headers into the wasm kernel's filesystem" OFF)
++    if(XEUS_CPP_WASM_PRELOAD_CLANG_HEADERS)
++        target_link_options(xcpp
++            PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang@/include/clang"
++            PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang-c@/include/clang-c"
++        )
++    endif()
++
+     target_link_options(xcpp
+         PUBLIC "SHELL: --preload-file ${ESCAPED_SYSROOT_PATH}/include@/include"
+         PUBLIC "SHELL: --preload-file ${ESCAPED_XEUS_CPP_RESOURCE_DIR}@/${CMAKE_INSTALL_LIBDIR}/clang/${CPPINTEROP_LLVM_VERSION_MAJOR}"
+@@ -528,7 +558,7 @@ if(EMSCRIPTEN)
+         PUBLIC "SHELL: --preload-file ${CPPJIT_BUILD_DIR}/libcppjit.so@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/libcppjit.so"
+         PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit"
+         PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit_backend@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit_backend"
+-        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}"
++        PUBLIC "SHELL: --preload-file ${XEUS_CPP_WASM_STDLIB_STAGE}@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}"
+         # The Python C-API headers, at the path sysconfig reports inside the
+         # kernel (`{prefix}/include/python3.x`), so cppjit puts them on the
+         # interpreter's include path. Cross-inheritance needs them: cppjit's
+@@ -536,8 +566,6 @@ if(EMSCRIPTEN)
+         # the interpreter at class-definition time, and without Python.h that
+         # compile fails.
+         PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/python${XEUS_CPP_WASM_PYTHON_VERSION}@/include/python${XEUS_CPP_WASM_PYTHON_VERSION}"
+-        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang@/include/clang"
+-        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang-c@/include/clang-c"
+         PUBLIC "SHELL: --post-js ${CMAKE_CURRENT_SOURCE_DIR}/wasm_patches/post.js"
+     )
+     # --preload-file arguments are opaque to CMake, so rebuilding libcppjit.so
