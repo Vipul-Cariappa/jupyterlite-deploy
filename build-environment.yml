@@ -5,6 +5,14 @@ dependencies:
   - python=3.12
   - pip
   - jupyter_server
+  - cmake
+  - make
+  # reads environment.yml in the workflow
+  - pyyaml
+  # Native LLVM, only so cppinterop-tblgen can be built: it turns CppInterOp's
+  # .td into .inc at build time and cannot run under emscripten. Same version as
+  # the wasm llvm the kernel links against.
+  - llvmdev==22.1.8
   - pip:
     - jupyterlite-core==0.8.3
     - jupyterlab~=4.6.0

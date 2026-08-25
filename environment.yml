@@ -20,6 +20,21 @@ dependencies:
   - sqlalchemy
   - xeus-sqlite
   - xeus-lua
+
+  # CppJIT dependency.
+  - emscripten-abi==4.0.9
+  - llvm==22.1.8
+  - cpp-argparse
+  - pugixml
+  - doctest
+  - nlohmann_json
+  - nlohmann_json-abi
+  
+  # CPython 3.13's _ssl still calls TLSv1_method and friends,
+  # which OpenSSL 4 dropped.
+  - openssl<4
+
+  - xz
   - xeus
   - xeus-lite
   - xtl
