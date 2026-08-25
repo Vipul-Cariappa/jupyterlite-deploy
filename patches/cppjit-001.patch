@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Fri, 21 Aug 2026 19:51:07 +0530
+Subject: Allow overriding where CppInterOp is installed and loaded from
+
+The path cppjit dlopens libclangCppInterOp from was fixed to the shipped
+`cppjit_backend` directory. That breaks embedding: a host such as a Jupyter
+kernel already links libclangCppInterOp and holds an interpreter, and
+loading a second copy of the library from a different path gives cppjit its
+own interpreter instead of the host's -- so Python sees an empty
+translation unit rather than the one the surrounding C++ cells built up.
+
+Make CPPINTEROP_INSTALL_DIR a cache variable so such a host can point both
+sides at one file, keeping the existing site-packages default otherwise.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit bb529619ea6c2a2cbcf7c77fca524d39779718c6)
+---
+ CMakeLists.txt | 27 ++++++++++++++++++---------
+ 1 file changed, 18 insertions(+), 9 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fc4d087..9676cea 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -89,16 +89,25 @@ endif()
+ 
+ # CppInterOp is installed at the location cppjit ships at runtime: ask for the
+ # site-packages path; fall back to CMAKE_INSTALL_PREFIX for standalone builds.
+-execute_process(
+-    COMMAND ${Python_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_path('platlib'))"
+-    OUTPUT_VARIABLE _python_platlib
+-    OUTPUT_STRIP_TRAILING_WHITESPACE
+-)
+-if(_python_platlib)
+-    set(CPPINTEROP_INSTALL_DIR "${_python_platlib}/cppjit_backend")
+-else()
+-    set(CPPINTEROP_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/cppjit_backend")
++# Set CPPINTEROP_INSTALL_DIR explicitly to point cppjit at a CppInterOp that
++# already lives elsewhere in the process -- an embedding host that links
++# libclangCppInterOp itself must be dlopen'd through the very same file, or
++# cppjit gets a second copy of the library and with it a second interpreter.
++set(CPPINTEROP_INSTALL_DIR "" CACHE PATH
++    "Prefix cppjit installs and loads CppInterOp from; defaults to the shipped cppjit_backend directory")
++if(NOT CPPINTEROP_INSTALL_DIR)
++    execute_process(
++        COMMAND ${Python_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_path('platlib'))"
++        OUTPUT_VARIABLE _python_platlib
++        OUTPUT_STRIP_TRAILING_WHITESPACE
++    )
++    if(_python_platlib)
++        set(CPPINTEROP_INSTALL_DIR "${_python_platlib}/cppjit_backend")
++    else()
++        set(CPPINTEROP_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/cppjit_backend")
++    endif()
+ endif()
++message(STATUS "CppInterOp install/load prefix: ${CPPINTEROP_INSTALL_DIR}")
+ 
+ # Include cmake for CppInterOp config and build using ExternalProject.
+ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/AddCppInterOp.cmake)

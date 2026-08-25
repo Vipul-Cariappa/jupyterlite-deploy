@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Fri, 21 Aug 2026 20:10:59 +0530
+Subject: Migrate to CppInterOp's typed handle API
+
+CppInterOp replaced the interchangeable `void*` aliases with distinct
+handle structs, so the old spellings no longer name anything and decls and
+types no longer convert into each other:
+
+  - Cpp::TInterp_t   -> Cpp::InterpRef  (and createInterpreter returns one
+                        rather than laundering it through void*)
+  - Cpp::TCppScope_t -> Cpp::DeclRef
+  - Cpp::TCppType_t  -> Cpp::TypeRef
+  - naming a type goes through GetTypeAsString; GetQualifiedName and
+    GetQualifiedCompleteName now take a decl only
+  - Evaluate returns a typed Cpp::Box, so unbox the C++ version as int
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit b0b3e66c36f2dfb8b355fcfad9e83275d32d6919)
+---
+ src/xinspect.cpp                  | 10 +++++-----
+ src/xinterpreter.cpp              |  4 ++--
+ src/xmagics/multi_interpreter.cpp |  4 ++--
+ src/xmagics/multi_interpreter.hpp |  2 +-
+ 4 files changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/src/xinspect.cpp b/src/xinspect.cpp
+index 1ec4571..bccd032 100644
+--- a/src/xinspect.cpp
++++ b/src/xinspect.cpp
+@@ -70,9 +70,9 @@ namespace xcpp
+         {
+             static unsigned long long var_count = 0;
+ 
+-            if (auto* type = Cpp::GetType(expression))
++            if (auto type = Cpp::GetType(expression))
+             {
+-                return Cpp::GetQualifiedName(type);
++                return Cpp::GetTypeAsString(type);
+             }
+ 
+             std::string id = "__Xeus_GetType_" + std::to_string(var_count++);
+@@ -80,9 +80,9 @@ namespace xcpp
+ 
+             if (!Cpp::Declare(using_clause.c_str(), false))
+             {
+-                Cpp::TCppScope_t lookup = Cpp::GetNamed(id, nullptr);
+-                Cpp::TCppType_t lookup_ty = Cpp::GetTypeFromScope(lookup);
+-                return Cpp::GetQualifiedCompleteName(Cpp::GetCanonicalType(lookup_ty));
++                Cpp::DeclRef lookup = Cpp::GetNamed(id, nullptr);
++                Cpp::TypeRef lookup_ty = Cpp::GetTypeFromScope(lookup);
++                return Cpp::GetTypeAsString(Cpp::GetCanonicalType(lookup_ty));
+             }
+             return "";
+         }
+diff --git a/src/xinterpreter.cpp b/src/xinterpreter.cpp
+index 2c73098..e49462f 100644
+--- a/src/xinterpreter.cpp
++++ b/src/xinterpreter.cpp
+@@ -35,7 +35,7 @@
+ 
+ using Args = std::vector<const char*>;
+ 
+-void* createInterpreter(const Args &ExtraArgs = {}) {
++Cpp::InterpRef createInterpreter(const Args &ExtraArgs = {}) {
+   Args ClangArgs = {/*"-xc++"*/"-v"};
+   std::string resource_dir;
+   if (std::find_if(ExtraArgs.begin(), ExtraArgs.end(), [](const std::string& s) {
+@@ -60,7 +60,7 @@ void* createInterpreter(const Args &ExtraArgs = {}) {
+   ClangArgs.insert(ClangArgs.end(), ExtraArgs.begin(), ExtraArgs.end());
+   // FIXME: We should process the kernel input options and conditionally pass
+   // the gpu args here.
+-  Cpp::TInterp_t res = Cpp::CreateInterpreter(ClangArgs /*, {"-cuda"}*/);
++  Cpp::InterpRef res = Cpp::CreateInterpreter(ClangArgs /*, {"-cuda"}*/);
+   if (!res)
+   {
+       return res;
+diff --git a/src/xmagics/multi_interpreter.cpp b/src/xmagics/multi_interpreter.cpp
+index af06577..d9cd6ba 100644
+--- a/src/xmagics/multi_interpreter.cpp
++++ b/src/xmagics/multi_interpreter.cpp
+@@ -37,8 +37,8 @@ namespace xcpp
+     {
+         auto Args0 = split(line.substr(len("subinterp")));
+ 
+-        Cpp::TInterp_t OldI = Cpp::GetInterpreter();  // we need to restore the old interpreter
+-        Cpp::TInterp_t I = nullptr;
++        Cpp::InterpRef OldI = Cpp::GetInterpreter();  // we need to restore the old interpreter
++        Cpp::InterpRef I = nullptr;
+         std::string name;
+         if (Args0[0] == "--use")
+         {
+diff --git a/src/xmagics/multi_interpreter.hpp b/src/xmagics/multi_interpreter.hpp
+index 7d83a2a..c08e2eb 100644
+--- a/src/xmagics/multi_interpreter.hpp
++++ b/src/xmagics/multi_interpreter.hpp
+@@ -26,7 +26,7 @@ namespace xcpp
+ 
+     private:
+ 
+-        std::unordered_map<std::string, Cpp::TInterp_t> interpreters;
++        std::unordered_map<std::string, Cpp::InterpRef> interpreters;
+     };
+ }  // namespace xcpp
+ 

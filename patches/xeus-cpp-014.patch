@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 12:26:23 +0530
+Subject: Track the preloaded python files as link dependencies
+
+--preload-file arguments are opaque to CMake, and the earlier fix for this named
+only libcppjit.so. Editing cppjit's python layer therefore relinked nothing:
+xcpp.data kept the previous copy and the kernel went on running code that no
+longer existed in the source tree.
+
+That is worse than a stale build, because the failure mode is indistinguishable
+from a fix that does not work. Two changes were tested and dismissed here before
+a grep through xcpp.data showed the old text still in it. Name the files that
+actually change during development so the relink happens.
+
+(cherry picked from commit 9b8ed5f710120220847d370e81b103cc97076563)
+---
+ CMakeLists.txt | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 81446e1..87371d8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -525,8 +525,16 @@ if(EMSCRIPTEN)
+     # on its own leaves xcpp.data holding the previous copy and the kernel
+     # silently keeps running the old code. Name the ones that get rebuilt during
+     # development as link dependencies so the relink happens.
++    # Directories preloaded above are opaque to CMake as well, so name the files
++    # that actually change during development. Without these, editing cppjit's
++    # python layer relinks nothing, xcpp.data keeps the previous copy, and the
++    # kernel runs code that no longer exists in the source tree -- a fix can
++    # then appear not to work when it was simply never deployed.
+     set_property(TARGET xcpp APPEND PROPERTY LINK_DEPENDS
+-        "${CPPJIT_BUILD_DIR}/libcppjit.so")
++        "${CPPJIT_BUILD_DIR}/libcppjit.so"
++        "${CPPJIT_SOURCE_DIR}/python/cppjit/__init__.py"
++        "${CPPJIT_SOURCE_DIR}/python/cppjit/_cpython_cppjit.py"
++        "${CPPJIT_SOURCE_DIR}/src/cpyrt/API.h")
+ endif()
+ # Tests
+ # =====

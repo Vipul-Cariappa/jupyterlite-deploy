@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Fri, 21 Aug 2026 19:39:20 +0530
+Subject: Let `Declare` target a specific interpreter
+
+`Declare` always went to whichever interpreter `getInterp()` happened to
+return, so a consumer juggling several interpreters had no way to declare
+into a non-active one without first activating it. Take an optional
+`InterpRef` instead, matching how the rest of the interpreter-scoped API
+is already parameterised.
+
+The generated C wrapper has no default arguments, so its one call site in
+CAPITest passes `nullptr` explicitly.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit c0415842a35292a6cf96771edbe3532546aa2827)
+---
+ lib/CppInterOp/CppInterOp.cpp     | 6 +++---
+ lib/CppInterOp/CppInterOp.td      | 3 ++-
+ unittests/CppInterOp/CAPITest.cpp | 2 +-
+ 3 files changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/lib/CppInterOp/CppInterOp.cpp b/lib/CppInterOp/CppInterOp.cpp
+index 663a1c7..b60d524 100644
+--- a/lib/CppInterOp/CppInterOp.cpp
++++ b/lib/CppInterOp/CppInterOp.cpp
+@@ -5486,9 +5486,9 @@ int Declare(compat::Interpreter& I, const char* code, bool silent) {
+   return result;
+ }
+ 
+-int Declare(const char* code, bool silent) {
+-  INTEROP_TRACE(code, silent);
+-  return INTEROP_RETURN(Declare(getInterp(), code, silent));
++int Declare(const char* code, bool silent, InterpRef I) {
++  INTEROP_TRACE(code, silent, I);
++  return INTEROP_RETURN(Declare(getInterp(I), code, silent));
+ }
+ 
+ int Process(const char* code) {
+diff --git a/lib/CppInterOp/CppInterOp.td b/lib/CppInterOp/CppInterOp.td
+index be9cd1e..76f5761 100644
+--- a/lib/CppInterOp/CppInterOp.td
++++ b/lib/CppInterOp/CppInterOp.td
+@@ -64,7 +64,8 @@ def Declare : CppInterOpAPI {
+   let ReturnType = "int";
+   let Args = [
+     Arg<"const char*", "code">,
+-    Arg<"bool", "silent", "false">
++    Arg<"bool", "silent", "false">,
++    Arg<"InterpRef", "I", "nullptr">
+   ];
+ }
+ 
+diff --git a/unittests/CppInterOp/CAPITest.cpp b/unittests/CppInterOp/CAPITest.cpp
+index 71f7097..321bd60 100644
+--- a/unittests/CppInterOp/CAPITest.cpp
++++ b/unittests/CppInterOp/CAPITest.cpp
+@@ -14,7 +14,7 @@ using namespace TestUtils;
+ 
+ TYPED_TEST(CppInterOpTest, CAPI_DeclareAndProcess) {
+   TestFixture::CreateInterpreter();
+-  EXPECT_EQ(0, cppinterop_Declare("int capi_var = 42;", false));
++  EXPECT_EQ(0, cppinterop_Declare("int capi_var = 42;", false, nullptr));
+   EXPECT_EQ(0, cppinterop_Process("capi_var++;"));
+ }
+ 

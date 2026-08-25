@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Fri, 21 Aug 2026 20:25:35 +0530
+Subject: Don't end a stream capture the failure path never began
+
+When Python initialization fails, `%%python` ended two stdio captures
+before either had been started -- the `BeginStdStreamCapture` calls sit
+further down, on the success path. Popping an empty capture stack
+segfaulted, so a legible "Failed to Initialize Python" turned into a dead
+kernel and no diagnostic at all.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+(cherry picked from commit de3b938bdaa3798180693d1a4ea83c1671c2e73f)
+---
+ src/xmagics/pythonexec.cpp | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/src/xmagics/pythonexec.cpp b/src/xmagics/pythonexec.cpp
+index 5a7bfc0..22706aa 100644
+--- a/src/xmagics/pythonexec.cpp
++++ b/src/xmagics/pythonexec.cpp
+@@ -22,10 +22,8 @@ namespace xcpp {
+         if (!is_initalized)
+             initialize();
+         if (!is_initalized) {
+-            // initializing failed    
+-            std::cout << Cpp::EndStdStreamCapture();
+-            std::cerr << Cpp::EndStdStreamCapture();
+-
++            // Nothing has been captured yet -- the Begin calls below are what
++            // opens a capture -- so ending one here would pop an empty stack.
+             std::cerr << "Failed to Initialize Python\n";
+             return;
+         }

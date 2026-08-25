@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 12:26:23 +0530
+Subject: Skip the libstdc++ load under emscripten
+
+Startup asks the interpreter to load libstdc++ so its symbols are available for
+lookup. On wasm the standard library is libc++, statically linked into the
+hosting module -- 5000-odd std:: symbols are already in xcpp.wasm -- so there is
+nothing to load and no file of that name anywhere in the toolchain.
+
+It is not a harmless no-op either. The name resolves to something fetchable that
+is not wasm, so the loader reports "need to see wasm magic number" and leaves a
+failed entry behind, which is noise directly above the far more interesting
+errors in the console.
+
+Natively the call is redundant too, since the process already has libstdc++
+through the compiler default and the dlopen only bumps a refcount -- so this
+guards the one platform where it does harm rather than removing it outright.
+
+(cherry picked from commit 213d3aa0ca0b46f4b72629ddb8d48ec71010d19d)
+---
+ src/interop/interop_wrapper.cxx | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/interop/interop_wrapper.cxx b/src/interop/interop_wrapper.cxx
+index c55bc05..88be5de 100644
+--- a/src/interop/interop_wrapper.cxx
++++ b/src/interop/interop_wrapper.cxx
+@@ -124,7 +124,13 @@ public:
+     }
+ 
+     Cpp::AddIncludePath(CPPINTEROP_INCLUDE_DIR);
++#ifndef __EMSCRIPTEN__
++    // Nothing to load under emscripten: the standard library there is libc++,
++    // statically linked into the hosting module. The name also resolves to
++    // something fetchable that is not wasm -- a 404 page -- so the loader
++    // reports "need to see wasm magic number" and leaves a failed entry behind.
+     Cpp::LoadLibrary("libstdc++", /* lookup= */ true);
++#endif
+ 
+     // load frequently used headers
+     const char* code = "#include <algorithm>\n"

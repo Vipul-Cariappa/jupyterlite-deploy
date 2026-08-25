@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Tue, 25 Aug 2026 18:50:37 +0530
+Subject: Preload the Python C-API headers
+
+cppjit puts the C-API include directory on the interpreter path from
+sysconfig.get_path("include"), but guards it on the directory existing -- and
+inside the kernel it did not exist, so the guard silently skipped it. The
+dispatcher cppjit compiles for a Python-side override is C++ full of PyObject*
+and C-API calls, so without Python.h in the browser filesystem it cannot be
+compiled at all.
+
+/include/python3.13 is where the embedded interpreter looks: main_emscripten
+sets base_prefix to "/", so sysconfig reports that path.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ CMakeLists.txt | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 87371d8..b7ac66e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -517,6 +517,13 @@ if(EMSCRIPTEN)
+         PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit"
+         PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit_backend@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit_backend"
+         PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}"
++        # The Python C-API headers, at the path sysconfig reports inside the
++        # kernel (`{prefix}/include/python3.x`), so cppjit puts them on the
++        # interpreter's include path. Cross-inheritance needs them: cppjit's
++        # generated dispatcher class is C++ that calls the C-API, compiled by
++        # the interpreter at class-definition time, and without Python.h that
++        # compile fails.
++        PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/python${XEUS_CPP_WASM_PYTHON_VERSION}@/include/python${XEUS_CPP_WASM_PYTHON_VERSION}"
+         PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang@/include/clang"
+         PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang-c@/include/clang-c"
+         PUBLIC "SHELL: --post-js ${CMAKE_CURRENT_SOURCE_DIR}/wasm_patches/post.js"

@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 09:59:16 +0530
+Subject: Preload the CppInterOp headers the interpreter is told to use
+
+cppjit hands the interpreter an include directory at startup and then processes
+a block of headers ending in `#include <CppInterOp/Dispatch.h>`. In the wasm
+kernel that directory is `/include` in the browser's filesystem, which had the
+sysroot, clang's headers and cpyrt's -- but not CppInterOp's. So the include
+failed, and with it the whole input.
+
+The consequence was far worse than a missing header. clang-repl's cleanup after
+a failed input leaves lookup damaged on the LLVM this builds against: the failing
+input itself is survivable, but the *next* declaration processed drops
+header-declared names out of name lookup. Everything a cell had declared stayed
+findable while `std` did not, so `import cppjit` died on `CreateScopeProxy("std")`
+claiming std was not a known C++ class -- in an interpreter that had just
+compiled `std::string` without complaint.
+
+Preloading the headers is the whole fix; the include resolves, the input
+succeeds, and nothing gets cleaned up. Worth knowing that the symptom pointed
+nowhere near the cause: the failing include is silent from Python's side, and
+what surfaces is a name lookup failing several steps later for a name that has
+nothing to do with the header that was missing.
+
+(cherry picked from commit ea106db6d8b0556a30327b20dc4a065fc77279ed)
+---
+ CMakeLists.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5dfabb9..81446e1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -512,6 +512,7 @@ if(EMSCRIPTEN)
+         PUBLIC "SHELL: --preload-file ${ESCAPED_SYSROOT_PATH}/include@/include"
+         PUBLIC "SHELL: --preload-file ${ESCAPED_XEUS_CPP_RESOURCE_DIR}@/${CMAKE_INSTALL_LIBDIR}/clang/${CPPINTEROP_LLVM_VERSION_MAJOR}"
+         PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/src/cpyrt@/include/cpyrt"
++        PUBLIC "SHELL: --preload-file ${CPPINTEROP_INSTALL_PREFIX}/include/CppInterOp@/include/CppInterOp"
+         PUBLIC "SHELL: --preload-file ${CPPJIT_BUILD_DIR}/libcppjit.so@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/libcppjit.so"
+         PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit"
+         PUBLIC "SHELL: --preload-file ${CPPJIT_SOURCE_DIR}/python/cppjit_backend@/lib/python${XEUS_CPP_WASM_PYTHON_VERSION}/site-packages/cppjit_backend"

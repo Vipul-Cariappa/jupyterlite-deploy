@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 09:07:27 +0530
+Subject: Say why `%%python` failed, and let Python run when cppjit will not
+ import
+
+Every way initialization could fail produced the same line, "Failed to Initialize
+Python", and threw the reason away: a failed Py_InitializeFromConfig dropped its
+PyStatus, and a failed `import cppjit` went to PyErr_Print, which writes to the
+process's stderr rather than the stream the cell is reading -- so the traceback
+landed in the browser console where the reader will not look. Both now report
+what happened into the cell.
+
+A cppjit that will not import also no longer tears the interpreter back down.
+Doing so cost the cell its C++ bindings *and* its ability to run Python at all,
+which made every later cell fail with the same message and left no way to
+investigate from Python itself -- which is exactly what one wants at that point.
+
+While here: --preload-file arguments are opaque to CMake, so rebuilding
+libcppjit.so on its own left xcpp.data holding the previous copy, and the kernel
+went on running the old code with no sign that anything was stale. Naming it as
+a link dependency makes the relink happen.
+
+(cherry picked from commit 759f9a01917d6cf31ce85fa83d5984cf6e1b407b)
+---
+ CMakeLists.txt             |  6 ++++
+ src/xmagics/pythonexec.cpp | 63 +++++++++++++++++++++++++++++++-------
+ 2 files changed, 58 insertions(+), 11 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 47ad953..5dfabb9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -520,6 +520,12 @@ if(EMSCRIPTEN)
+         PUBLIC "SHELL: --preload-file ${CMAKE_PREFIX_PATH}/include/clang-c@/include/clang-c"
+         PUBLIC "SHELL: --post-js ${CMAKE_CURRENT_SOURCE_DIR}/wasm_patches/post.js"
+     )
++    # --preload-file arguments are opaque to CMake, so rebuilding libcppjit.so
++    # on its own leaves xcpp.data holding the previous copy and the kernel
++    # silently keeps running the old code. Name the ones that get rebuilt during
++    # development as link dependencies so the relink happens.
++    set_property(TARGET xcpp APPEND PROPERTY LINK_DEPENDS
++        "${CPPJIT_BUILD_DIR}/libcppjit.so")
+ endif()
+ # Tests
+ # =====
+diff --git a/src/xmagics/pythonexec.cpp b/src/xmagics/pythonexec.cpp
+index 58e8ca9..edbe518 100644
+--- a/src/xmagics/pythonexec.cpp
++++ b/src/xmagics/pythonexec.cpp
+@@ -9,6 +9,7 @@
+ #include "pythonexec.hpp"
+ #include "../xparser.hpp"
+ #include <cstdio>
++#include <iostream>
+ #include <string>
+ 
+ #include "Python.h"
+@@ -25,7 +26,7 @@ namespace xcpp {
+         if (!is_initalized) {
+             // Nothing has been captured yet -- the Begin calls below are what
+             // opens a capture -- so ending one here would pop an empty stack.
+-            std::cerr << "Failed to Initialize Python\n";
++            // initialize() has already said what went wrong.
+             return;
+         }
+         
+@@ -55,6 +56,42 @@ namespace xcpp {
+         std::cerr << Cpp::EndStdStreamCapture();
+     }
+ 
++    namespace {
++        // Turn a pending Python exception into a line worth printing. PyErr_Print
++        // would write to the process's stderr, which is not what the cell is
++        // reading, so the failure would reach the browser console and nowhere the
++        // reader can see.
++        std::string take_python_error() {
++            if (!PyErr_Occurred())
++                return {};
++            PyObject* type = nullptr;
++            PyObject* value = nullptr;
++            PyObject* traceback = nullptr;
++            PyErr_Fetch(&type, &value, &traceback);
++            PyErr_NormalizeException(&type, &value, &traceback);
++
++            std::string message;
++            if (value) {
++                if (PyObject* text = PyObject_Str(value)) {
++                    if (const char* utf8 = PyUnicode_AsUTF8(text))
++                        message = utf8;
++                    Py_DECREF(text);
++                }
++            }
++            if (type) {
++                if (PyObject* name = PyObject_GetAttrString(type, "__name__")) {
++                    if (const char* utf8 = PyUnicode_AsUTF8(name))
++                        message = std::string(utf8) + ": " + message;
++                    Py_DECREF(name);
++                }
++            }
++            Py_XDECREF(type);
++            Py_XDECREF(value);
++            Py_XDECREF(traceback);
++            return message;
++        }
++    } // namespace
++
+     void pythonexec::initialize() {
+ #ifdef EMSCRIPTEN
+         PyStatus status;
+@@ -69,7 +106,9 @@ namespace xcpp {
+ 
+         status = Py_InitializeFromConfig(&config);
+         if (PyStatus_Exception(status)) {
+-            // TODO: initialization failed, propagate error
++            std::cerr << "Failed to initialize Python: "
++                      << (status.err_msg ? status.err_msg : "unknown error")
++                      << "\n";
+             PyConfig_Clear(&config);
+             is_initalized = false;
+             return;
+@@ -84,16 +123,18 @@ namespace xcpp {
+         // cppjit binds against whichever interpreter CppInterOp already has,
+         // so importing it here hands the Python side this kernel's own
+         // translation unit rather than a fresh one.
+-        PyObject* cppjitModule = PyImport_ImportModule("cppjit");
+-        if (!cppjitModule) {
+-            PyErr_Print();
+-            Py_Finalize();
+-            return; // Handle import error as needed
+-        }
+-
++        // A cppjit that will not import costs the cell its C++ bindings, but not
++        // the ability to run Python. Report it and carry on -- tearing the
++        // interpreter back down would make every later `%%python` cell fail with
++        // the same message and leave no way to look into why from Python itself.
+         PyObject* mainModule = PyImport_AddModule("__main__");
+-        PyObject_SetAttrString(mainModule, "cppjit", cppjitModule);
+-        Py_XDECREF(cppjitModule);
++        if (PyObject* cppjitModule = PyImport_ImportModule("cppjit")) {
++            PyObject_SetAttrString(mainModule, "cppjit", cppjitModule);
++            Py_XDECREF(cppjitModule);
++        } else {
++            std::cerr << "Failed to import cppjit: " << take_python_error()
++                      << "\n(`%%python` cells still run; `cppjit` is unavailable)\n";
++        }
+ 
+         is_initalized = true;
+     }

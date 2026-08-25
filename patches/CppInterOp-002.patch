@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 09:07:15 +0530
+Subject: Reach a CppInterOp that is already in the process
+
+The dispatch loader only ever resolved the API by dlopen'ing a path. An
+embedding host that links or loads libclangCppInterOp itself owns the
+interpreter, and a client that opens its own copy gets a second library with a
+second, empty interpreter -- so nothing the host declared is visible to it. The
+existing way out was for the client to name the very same file the host used,
+which the client generally has no way to know, and which does not exist as a
+path at all in a wasm build where the host may have linked the library rather
+than loaded it.
+
+Look for CppGetProcAddress in the process first, and only fall back to opening a
+path when it is absent. dlopen(NULL) is the portable spelling of "the symbols
+already here" and works under emscripten's dynamic linker as well as on ELF;
+Windows gets the GetModuleHandle(NULL) equivalent.
+
+A client that is genuinely alone in the process sees no change: the lookup
+misses and the path is used exactly as before, so a bad path still fails and a
+good one still succeeds.
+
+(cherry picked from commit 0e8ef4b25dee9278d9cbb9bf570db2ec8404bbf3)
+---
+ include/CppInterOp/Dispatch.h | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/include/CppInterOp/Dispatch.h b/include/CppInterOp/Dispatch.h
+index 9a7b5a0..095f045 100644
+--- a/include/CppInterOp/Dispatch.h
++++ b/include/CppInterOp/Dispatch.h
+@@ -61,6 +61,33 @@ inline void* dlGetProcAddress(const char* name,
+   }
+ 
+   std::call_once(*init, [customLibPath]() {
++    // A CppInterOp already in the process wins over any path. An embedding host
++    // that links or loads the library itself owns the interpreter, and a client
++    // that goes and opens its own copy gets a second library with a second,
++    // empty interpreter instead of the host's -- the symptom being that nothing
++    // the host declared is visible. Which file the host used, and whether it
++    // linked rather than dlopen'd, does not have to be known here: what matters
++    // is that the lookup goes through the copy that is already loaded.
++#ifdef _WIN32
++    if (HMODULE self = GetModuleHandleA(nullptr)) {
++      if (auto* proc = reinterpret_cast<void* (*)(const char*)>(
++              GetProcAddress(self, "CppGetProcAddress"))) {
++        getProc = proc;
++        return;
++      }
++    }
++#else
++    if (void* self = dlopen(nullptr, RTLD_LOCAL | RTLD_NOW)) {
++      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
++      if (auto* proc = reinterpret_cast<void* (*)(const char*)>(
++              dlsym(self, "CppGetProcAddress"))) {
++        getProc = proc;
++        return;
++      }
++      dlclose(self);
++    }
++#endif
++
+     const char* path =
+         customLibPath ? customLibPath : std::getenv("CPPINTEROP_LIBRARY_PATH");
+     if (!path)

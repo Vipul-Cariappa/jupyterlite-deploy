@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Tue, 25 Aug 2026 18:51:27 +0530
+Subject: Ship only the C++23 and C23 kernels in the wasm build
+
+Every kernelspec in a JupyterLite site points at its own copy of the kernel, and
+this one is a whole clang: shipping standards nobody selected costs a visitor
+tens of megabytes each. The two newest are enough for a deployment.
+
+The families dropped here could not work in a browser regardless. The CUDA
+kernels have no device and no CUDA toolkit in the emscripten sysroot for the
+host pass to include, and their wasm kernelspecs were copies of the plain C++
+ones, so the launcher showed two identical entries per standard. OpenMP has no
+libomp built for wasm32-emscripten: with -fopenmp the incremental module fails
+to load, and without it clang ignores the pragma and the loop runs on one
+thread while looking like it worked.
+
+Native builds keep every kernel they had.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ CMakeLists.txt | 32 ++++++++++++++++++++++----------
+ 1 file changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b7ac66e..b7e77d1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -174,16 +174,28 @@ function(configure_kernel kernel)
+ endfunction()
+ 
+ message("Configure kernels: ...")
+-configure_kernel("/share/jupyter/kernels/xcpp17/")
+-configure_kernel("/share/jupyter/kernels/xcpp20/")
+-configure_kernel("/share/jupyter/kernels/xcpp23/")
+-configure_kernel("/share/jupyter/kernels/xcpp17-cuda/")
+-configure_kernel("/share/jupyter/kernels/xcpp20-cuda/")
+-configure_kernel("/share/jupyter/kernels/xcpp23-cuda/")
+-configure_kernel("/share/jupyter/kernels/xc11/")
+-configure_kernel("/share/jupyter/kernels/xc17/")
+-configure_kernel("/share/jupyter/kernels/xc23/")
+-if(NOT EMSCRIPTEN)
++if(EMSCRIPTEN)
++  # A wasm deployment ships the two newest standards and nothing else. Every
++  # kernel here is a separate copy of the whole clang-based kernel in the site,
++  # so an unused one is tens of megabytes a visitor may have to fetch.
++  #
++  # The families that are left out cannot work in a browser anyway: the CUDA
++  # kernels have no device and no CUDA toolkit in the emscripten sysroot, and
++  # the OpenMP ones have no libomp built for wasm32-emscripten -- with -fopenmp
++  # the incremental module fails to load, and without it the pragma is ignored
++  # and the loop silently runs on one thread.
++  configure_kernel("/share/jupyter/kernels/xcpp23/")
++  configure_kernel("/share/jupyter/kernels/xc23/")
++else()
++  configure_kernel("/share/jupyter/kernels/xcpp17/")
++  configure_kernel("/share/jupyter/kernels/xcpp20/")
++  configure_kernel("/share/jupyter/kernels/xcpp23/")
++  configure_kernel("/share/jupyter/kernels/xcpp17-cuda/")
++  configure_kernel("/share/jupyter/kernels/xcpp20-cuda/")
++  configure_kernel("/share/jupyter/kernels/xcpp23-cuda/")
++  configure_kernel("/share/jupyter/kernels/xc11/")
++  configure_kernel("/share/jupyter/kernels/xc17/")
++  configure_kernel("/share/jupyter/kernels/xc23/")
+   configure_kernel("/share/jupyter/kernels/xcpp23-omp/")
+   configure_kernel("/share/jupyter/kernels/xc23-omp/")
+ endif()

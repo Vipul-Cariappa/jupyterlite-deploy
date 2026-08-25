@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Vipul Cariappa <vipulcariappa@gmail.com>
+Date: Sat, 22 Aug 2026 12:26:07 +0530
+Subject: Do not inspect a nonexistent executable when initializing the dyld
+
+initializeDyld opens the running executable as an object file to learn its
+format:
+
+    std::string exeP = GetExecutablePath();
+    auto ObjF = cantFail(llvm::object::ObjectFile::createObjectFile(exeP));
+
+Under emscripten there is no such file. createObjectFile fails on whatever
+GetExecutablePath returns and cantFail turns that into an abort, so the
+DynamicLibraryManager can never be constructed at all -- and the manager is
+built lazily on first use, which means the abort surfaces from whichever API
+happens to touch it first rather than from here.
+
+In practice that was AddSearchPath, called during cppjit's import to register
+library paths. What a reader saw was a wasm trap, "indirect call to null",
+reported against a JIT'd wrapper several frames up, with nothing tying it to a
+dyld that had failed to initialize. Every route into AddSearchPath died the same
+way, which is what eventually gave it away: the cause had to be inside the
+function rather than in how it was reached.
+
+Name the format directly instead of deriving it from a file. Symbol resolution
+under emscripten goes through its own dlopen/dlsym, so there is no native loader
+to interrogate and nothing that depends on the answer.
+
+(cherry picked from commit 4aafe17b778bad5cf0c498530af03430a7fb1ea3)
+---
+ lib/CppInterOp/DynamicLibraryManagerSymbol.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/lib/CppInterOp/DynamicLibraryManagerSymbol.cpp b/lib/CppInterOp/DynamicLibraryManagerSymbol.cpp
+index abc77bb..18b1fea 100644
+--- a/lib/CppInterOp/DynamicLibraryManagerSymbol.cpp
++++ b/lib/CppInterOp/DynamicLibraryManagerSymbol.cpp
+@@ -1314,11 +1314,22 @@ void DynamicLibraryManager::initializeDyld(
+   if (m_Dyld)
+     delete m_Dyld;
+ 
++#ifdef __EMSCRIPTEN__
++  // A browser has no executable object file to inspect and no native dynamic
++  // loader to enumerate: createObjectFile fails on whatever GetExecutablePath
++  // returns, and cantFail turns that into an abort. The abort surfaces from
++  // whichever API first reaches the manager -- AddSearchPath, in practice --
++  // as a wasm trap with nothing to connect it back to here. Symbol resolution
++  // under emscripten goes through its own dlopen/dlsym anyway, so name the
++  // format directly and skip the inspection.
++  m_Dyld = new Dyld(*this, shouldPermanentlyIgnore, "WASM");
++#else
+   std::string exeP = GetExecutablePath();
+   auto ObjF = cantFail(llvm::object::ObjectFile::createObjectFile(exeP));
+ 
+   m_Dyld = new Dyld(*this, shouldPermanentlyIgnore,
+                     ObjF.getBinary()->getFileFormatName());
++#endif
+ }
+ 
+ std::string DynamicLibraryManager::searchLibrariesForSymbol(
